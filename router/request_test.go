@@ -78,6 +78,42 @@ func TestValidateRejectsUnknownSubscription(t *testing.T) {
 	}
 }
 
+func TestAddTickersValidateRejectsEmptyTickers(t *testing.T) {
+	req := AddTickersRequest{}
+	if _, err := req.validate(); err == nil {
+		t.Fatal("expected an error for empty tickers")
+	}
+}
+
+func TestAddTickersValidateNormalizesTickers(t *testing.T) {
+	req := AddTickersRequest{Tickers: []string{" tsla "}}
+	cfg, err := req.validate()
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if len(cfg.tickers) != 1 || cfg.tickers[0] != "TSLA" {
+		t.Fatalf("unexpected normalized tickers: %v", cfg.tickers)
+	}
+}
+
+func TestAddTickersValidateDefaultsSubscriptions(t *testing.T) {
+	req := AddTickersRequest{Tickers: []string{"TSLA"}}
+	cfg, err := req.validate()
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if len(cfg.subscriptions) != 3 {
+		t.Fatalf("expected 3 default subscriptions, got %v", cfg.subscriptions)
+	}
+}
+
+func TestAddTickersValidateRejectsUnknownSubscription(t *testing.T) {
+	req := AddTickersRequest{Tickers: []string{"TSLA"}, Subscriptions: []string{"ticks"}}
+	if _, err := req.validate(); err == nil {
+		t.Fatal("expected an error for an unsupported subscription type")
+	}
+}
+
 func TestChannelForDerivesDeterministicNames(t *testing.T) {
 	cases := []struct {
 		sub  subscriptionType
