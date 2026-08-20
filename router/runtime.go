@@ -16,6 +16,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"net/http"
 	"sync"
 	"sync/atomic"
 
@@ -25,10 +26,13 @@ import (
 	"github.com/xd-dash/logma-serverless/pubsub"
 )
 
-// shutdownControlChannel is a fixed, global channel name -- publishing to
-// it ends every stonks Runtime currently listening, the same broadcast
-// semantics logma-serverless's own control:shutdown channel has.
-const shutdownControlChannel = "stonks:control:shutdown"
+// Fixed, global channel names -- publishing to them affects every stonks
+// Runtime currently listening, the same broadcast semantics
+// logma-serverless's own control:add/control:shutdown channels have.
+const (
+	shutdownControlChannel = "stonks:control:shutdown"
+	addControlChannel      = "stonks:control:add"
+)
 
 const (
 	runtimeStateIdle int32 = iota
@@ -56,6 +60,8 @@ type Runtime struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	done   chan struct{}
+
+	invocation pubsub.InvocationInfo
 
 	state     atomic.Int32
 	startOnce sync.Once
@@ -117,6 +123,14 @@ func (rt *Runtime) publish(sub subscriptionType, symbol string, event any) {
 	}
 }
 
+// RecordInvocation captures which Cloud Function instance and HTTP
+// request are driving this Runtime. It must be called after a
+// successful Claim and before Start -- Start records it in Redis as the
+// first thing it does, strictly before the client's first Subscribe.
+func (rt *Runtime) RecordInvocation(r *http.Request, requestID string) {
+	rt.invocation = pubsub.InvocationInfoFromRequest(r, requestID)
+}
+
 // Claim attempts to take exclusive ownership of the runtime for the
 // calling request. It returns false if the runtime has already been
 // claimed or has already run to completion.
@@ -153,10 +167,19 @@ func (rt *Runtime) Start(ctx context.Context) {
 			}
 		}()
 
+		// Recorded via plain Redis commands before the client issues its
+		// first Subscribe below -- once it does, this client is never
+		// used for anything but Publish/Subscribe again.
+		if err := pubsub.RegisterInvocation(rt.ctx, rt.client, rt.invocation); err != nil {
+			log.Printf("stonks: failed to record invocation info: %v", err)
+		}
+
 		shutdown := pubsub.Subscribe(rt.ctx, rt.client, shutdownControlChannel, rt.handleShutdown)
+		add := pubsub.Subscribe(rt.ctx, rt.client, addControlChannel, rt.handleAdd)
 		defer func() {
 			rt.cancel()
 			<-shutdown.Stopped()
+			<-add.Stopped()
 		}()
 
 		if err := rt.streamClient.Connect(rt.ctx); err != nil {
@@ -184,4 +207,42 @@ func (rt *Runtime) handleShutdown(payload string) {
 	}
 	log.Printf("stonks: shutting down runtime: reason=%q", request.Reason)
 	rt.cancel()
+}
+
+// handleAdd hot-adds tickers to the already-connected Alpaca stream, in
+// response to a stonks:control:add publish -- the only way to add
+// tickers once POST /stream has claimed the runtime and is blocked in
+// Start. It's only ever called sequentially from the single
+// control:add subscriber goroutine, so it never calls the SDK's
+// subscription-change methods concurrently with itself.
+func (rt *Runtime) handleAdd(payload string) {
+	var request AddTickersRequest
+	if err := json.Unmarshal([]byte(payload), &request); err != nil {
+		log.Printf("stonks: invalid add-tickers message: %v", err)
+		return
+	}
+
+	cfg, err := request.validate()
+	if err != nil {
+		log.Printf("stonks: invalid add-tickers request: %v", err)
+		return
+	}
+
+	for _, sub := range cfg.subscriptions {
+		var subErr error
+		switch sub {
+		case subTrades:
+			subErr = rt.streamClient.SubscribeToTrades(rt.onTrade, cfg.tickers...)
+		case subQuotes:
+			subErr = rt.streamClient.SubscribeToQuotes(rt.onQuote, cfg.tickers...)
+		case subBars:
+			subErr = rt.streamClient.SubscribeToBars(rt.onBar, cfg.tickers...)
+		case subDailyBars:
+			subErr = rt.streamClient.SubscribeToDailyBars(rt.onDailyBar, cfg.tickers...)
+		}
+		if subErr != nil {
+			log.Printf("stonks: failed to add %s subscription for %v: %v", sub, cfg.tickers, subErr)
+		}
+	}
+	log.Printf("stonks: added tickers %v (%v)", cfg.tickers, cfg.subscriptions)
 }

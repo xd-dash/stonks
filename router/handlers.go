@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/go-chi/chi/v5/middleware"
+
 	"github.com/xd-dash/logma-serverless/pubsub"
 )
 
@@ -32,6 +34,7 @@ func streamHandler(holder *pubsub.Holder[*Runtime]) http.HandlerFunc {
 			http.Error(w, "stream already running", http.StatusConflict)
 			return
 		}
+		rt.RecordInvocation(r, middleware.GetReqID(r.Context()))
 		rt.Configure(cfg)
 
 		rt.Start(r.Context())

@@ -67,41 +67,91 @@ type streamConfig struct {
 // validate normalizes and checks the request, returning the config a
 // Runtime needs to build its Alpaca subscriptions.
 func (req StreamRequest) validate() (streamConfig, error) {
-	if len(req.Tickers) == 0 {
-		return streamConfig{}, errors.New("tickers must be non-empty")
-	}
-	tickers := make([]string, 0, len(req.Tickers))
-	for _, t := range req.Tickers {
-		t = strings.ToUpper(strings.TrimSpace(t))
-		if t == "" {
-			return streamConfig{}, errors.New("tickers must not contain empty values")
-		}
-		tickers = append(tickers, t)
+	tickers, err := validateTickers(req.Tickers)
+	if err != nil {
+		return streamConfig{}, err
 	}
 
-	var feed marketdata.Feed
-	switch strings.ToLower(strings.TrimSpace(req.Feed)) {
-	case "", "iex":
-		feed = marketdata.IEX
-	case "sip":
-		feed = marketdata.SIP
-	default:
-		return streamConfig{}, fmt.Errorf("unsupported feed %q: must be \"iex\" or \"sip\"", req.Feed)
+	feed, err := validateFeed(req.Feed)
+	if err != nil {
+		return streamConfig{}, err
 	}
 
-	subs := defaultSubscriptions
-	if len(req.Subscriptions) > 0 {
-		subs = make([]subscriptionType, 0, len(req.Subscriptions))
-		for _, s := range req.Subscriptions {
-			st := subscriptionType(strings.ToLower(strings.TrimSpace(s)))
-			switch st {
-			case subTrades, subQuotes, subBars, subDailyBars:
-				subs = append(subs, st)
-			default:
-				return streamConfig{}, fmt.Errorf("unsupported subscription %q", s)
-			}
-		}
+	subs, err := validateSubscriptions(req.Subscriptions)
+	if err != nil {
+		return streamConfig{}, err
 	}
 
 	return streamConfig{tickers: tickers, feed: feed, subscriptions: subs}, nil
+}
+
+// AddTickersRequest is the payload published to stonks:control:add to
+// hot-add tickers to an already-running stream. There's no feed field --
+// Alpaca's feed is fixed for the lifetime of the stream's connection.
+type AddTickersRequest struct {
+	Tickers       []string `json:"tickers"`
+	Subscriptions []string `json:"subscriptions"`
+}
+
+// addConfig is the validated, normalized form of an AddTickersRequest.
+type addConfig struct {
+	tickers       []string
+	subscriptions []subscriptionType
+}
+
+func (req AddTickersRequest) validate() (addConfig, error) {
+	tickers, err := validateTickers(req.Tickers)
+	if err != nil {
+		return addConfig{}, err
+	}
+
+	subs, err := validateSubscriptions(req.Subscriptions)
+	if err != nil {
+		return addConfig{}, err
+	}
+
+	return addConfig{tickers: tickers, subscriptions: subs}, nil
+}
+
+func validateTickers(raw []string) ([]string, error) {
+	if len(raw) == 0 {
+		return nil, errors.New("tickers must be non-empty")
+	}
+	tickers := make([]string, 0, len(raw))
+	for _, t := range raw {
+		t = strings.ToUpper(strings.TrimSpace(t))
+		if t == "" {
+			return nil, errors.New("tickers must not contain empty values")
+		}
+		tickers = append(tickers, t)
+	}
+	return tickers, nil
+}
+
+func validateFeed(raw string) (marketdata.Feed, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "iex":
+		return marketdata.IEX, nil
+	case "sip":
+		return marketdata.SIP, nil
+	default:
+		return "", fmt.Errorf("unsupported feed %q: must be \"iex\" or \"sip\"", raw)
+	}
+}
+
+func validateSubscriptions(raw []string) ([]subscriptionType, error) {
+	if len(raw) == 0 {
+		return defaultSubscriptions, nil
+	}
+	subs := make([]subscriptionType, 0, len(raw))
+	for _, s := range raw {
+		st := subscriptionType(strings.ToLower(strings.TrimSpace(s)))
+		switch st {
+		case subTrades, subQuotes, subBars, subDailyBars:
+			subs = append(subs, st)
+		default:
+			return nil, fmt.Errorf("unsupported subscription %q", s)
+		}
+	}
+	return subs, nil
 }
