@@ -1,10 +1,16 @@
 // Package router implements the stonks HTTP entry point: POST /stream
 // takes a list of tickers, connects to the Alpaca market-data stream on
 // their behalf, and publishes every trade/quote/bar it receives onto a
-// deterministic Redis channel (stonks:<type>:<SYMBOL>) instead of
-// returning it over the same HTTP connection. Anyone who wants to watch
-// the stream connects to logma-serverless, which subscribes to those
-// channels and fans them out over SSE.
+// Redis channel instead of returning it over the same HTTP connection --
+// either one channel per (type, symbol) pair (stonks:<type>:<SYMBOL>) or,
+// for a type listed in the request's combined_channels, one channel
+// shared by every requested ticker (stonks:<type>:combined:<SYMBOL1>:
+// <SYMBOL2>:...). Either way the channel is scoped to the specific
+// container instance producing it (a ":<instanceID>" suffix, via the
+// same InstanceChannel every control channel already uses), since more
+// than one container can be streaming the same ticker/type at once.
+// Anyone who wants to watch the stream connects to logma-serverless,
+// which subscribes to those channels and fans them out over SSE.
 //
 // StonksRuntime embeds pubsub.Runtime, which owns the single
 // *redis.Client (used for exactly two things: Publish for outbound
@@ -100,9 +106,24 @@ func (rt *StonksRuntime) onBar(b stream.Bar)      { rt.publish(subBars, b.Symbol
 func (rt *StonksRuntime) onDailyBar(b stream.Bar) { rt.publish(subDailyBars, b.Symbol, b) }
 
 func (rt *StonksRuntime) publish(sub subscriptionType, symbol string, event any) {
-	if err := rt.Runtime.Publish(channelFor(sub, symbol), event); err != nil {
+	channel := rt.InstanceChannel(rt.baseChannel(sub, symbol))
+	if err := rt.Runtime.Publish(channel, event); err != nil {
 		log.Printf("stonks: %v", err)
 	}
+}
+
+// baseChannel picks channelFor (per-symbol) or combinedChannelFor
+// (shared across every ticker in rt.cfg.tickers), per
+// rt.cfg.combined[sub]. rt.cfg.tickers is fixed at Configure time and
+// never mutated by handleAdd, so a combined channel's name stays fixed
+// to the original request's ticker set even after tickers are hot-added
+// via control:add -- the hot-added tickers' events still land on that
+// same channel, they just aren't reflected in its name.
+func (rt *StonksRuntime) baseChannel(sub subscriptionType, symbol string) string {
+	if rt.cfg.combined[sub] {
+		return combinedChannelFor(sub, rt.cfg.tickers)
+	}
+	return channelFor(sub, symbol)
 }
 
 // streamAlpaca is the Work half of Configure's ServiceSpec: connect to

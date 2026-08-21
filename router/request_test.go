@@ -66,8 +66,8 @@ func TestValidateDefaultsSubscriptions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	if len(cfg.subscriptions) != 3 {
-		t.Fatalf("expected 3 default subscriptions, got %v", cfg.subscriptions)
+	if len(cfg.subscriptions) != 1 || cfg.subscriptions[0] != subBars {
+		t.Fatalf("expected default subscriptions to be [bars], got %v", cfg.subscriptions)
 	}
 }
 
@@ -102,8 +102,8 @@ func TestAddTickersValidateDefaultsSubscriptions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	if len(cfg.subscriptions) != 3 {
-		t.Fatalf("expected 3 default subscriptions, got %v", cfg.subscriptions)
+	if len(cfg.subscriptions) != 1 || cfg.subscriptions[0] != subBars {
+		t.Fatalf("expected default subscriptions to be [bars], got %v", cfg.subscriptions)
 	}
 }
 
@@ -128,5 +128,47 @@ func TestChannelForDerivesDeterministicNames(t *testing.T) {
 		if got := channelFor(c.sub, "AAPL"); got != c.want {
 			t.Errorf("channelFor(%q, AAPL) = %q, want %q", c.sub, got, c.want)
 		}
+	}
+}
+
+func TestCombinedChannelForSortsTickersRegardlessOfInputOrder(t *testing.T) {
+	want := "stonks:quote:combined:AAPL:MSFT"
+	if got := combinedChannelFor(subQuotes, []string{"MSFT", "AAPL"}); got != want {
+		t.Errorf("combinedChannelFor(subQuotes, [MSFT AAPL]) = %q, want %q", got, want)
+	}
+	if got := combinedChannelFor(subQuotes, []string{"AAPL", "MSFT"}); got != want {
+		t.Errorf("combinedChannelFor(subQuotes, [AAPL MSFT]) = %q, want %q", got, want)
+	}
+}
+
+func TestValidateCombinedChannelsEmptyIsNilMap(t *testing.T) {
+	combined, err := validateCombinedChannels(nil, []subscriptionType{subQuotes})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if combined != nil {
+		t.Fatalf("expected a nil map for an empty list, got %v", combined)
+	}
+}
+
+func TestValidateCombinedChannelsAcceptsTypeInSubscriptions(t *testing.T) {
+	combined, err := validateCombinedChannels([]string{"quotes"}, []subscriptionType{subQuotes, subBars})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if !combined[subQuotes] {
+		t.Fatalf("expected quotes to be combined, got %v", combined)
+	}
+}
+
+func TestValidateCombinedChannelsRejectsUnknownType(t *testing.T) {
+	if _, err := validateCombinedChannels([]string{"ticks"}, []subscriptionType{subQuotes}); err == nil {
+		t.Fatal("expected an error for an unrecognized combined_channels entry")
+	}
+}
+
+func TestValidateCombinedChannelsRejectsTypeNotInSubscriptions(t *testing.T) {
+	if _, err := validateCombinedChannels([]string{"trades"}, []subscriptionType{subQuotes}); err == nil {
+		t.Fatal("expected an error for a combined_channels entry absent from subscriptions")
 	}
 }
