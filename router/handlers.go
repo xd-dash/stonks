@@ -15,7 +15,7 @@ import (
 // error), reporting the outcome as JSON. Consumers never connect to
 // stonks itself for the data -- they subscribe to the derived Redis
 // channels through logma-serverless's SSE layer instead.
-func streamHandler(holder *pubsub.Holder[*Runtime]) http.HandlerFunc {
+func streamHandler(holder *pubsub.Holder[*StonksRuntime]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req StreamRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
