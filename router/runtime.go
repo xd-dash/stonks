@@ -47,26 +47,22 @@ type StonksRuntime struct {
 // It does not connect to Redis or Alpaca, and has no stream
 // configuration, until Configure and Start are called.
 func NewStonksRuntime() *StonksRuntime {
-	return &StonksRuntime{Runtime: pubsub.NewRuntime(pubsub.NewClientFromEnv())}
+	return &StonksRuntime{Runtime: pubsub.NewRuntimeFromEnv()}
 }
 
 // Configure wires this StonksRuntime's Alpaca stream client to cfg and
-// declares the ServiceSpec the embedded pubsub.Runtime's Start will
-// run: which control channels it listens on (control:shutdown gets the
-// default parse-log-Cancel handler every such channel wants;
-// control:add is genuinely stonks-specific) and streamAlpaca as the
-// actual work. It must be called exactly once, after a successful
-// Claim and before Start.
+// declares, via ConfigureDefault, the ServiceSpec the embedded
+// pubsub.Runtime's Start will run: control:add (the only channel
+// genuinely stonks-specific -- control:shutdown's handling is the
+// embedded Runtime's default) and streamAlpaca as the actual work. It
+// must be called exactly once, after a successful Claim and before
+// Start.
 func (rt *StonksRuntime) Configure(cfg streamConfig) {
 	rt.cfg = cfg
 	rt.streamClient = stream.NewStocksClient(cfg.feed, rt.streamOptions()...)
 
-	rt.Runtime.Configure(pubsub.ServiceSpec{
-		Channels: pubsub.ChannelHandlers{
-			rt.ShutdownChannel(): rt.DefaultShutdownHandler(),
-			rt.AddChannel():      rt.handleAdd,
-		},
-		Work: rt.streamAlpaca,
+	rt.Runtime.ConfigureDefault(rt.streamAlpaca, pubsub.ChannelHandlers{
+		rt.AddChannel(): rt.handleAdd,
 	})
 }
 
@@ -96,15 +92,8 @@ func (rt *StonksRuntime) onBar(b stream.Bar)      { rt.publish(subBars, b.Symbol
 func (rt *StonksRuntime) onDailyBar(b stream.Bar) { rt.publish(subDailyBars, b.Symbol, b) }
 
 func (rt *StonksRuntime) publish(sub subscriptionType, symbol string, event any) {
-	data, err := json.Marshal(event)
-	if err != nil {
-		log.Printf("stonks: failed to marshal %s event for %s: %v", sub, symbol, err)
-		return
-	}
-
-	channel := channelFor(sub, symbol)
-	if err := rt.Client.Publish(rt.Context(), channel, data).Err(); err != nil {
-		log.Printf("stonks: failed to publish to %s: %v", channel, err)
+	if err := rt.Runtime.Publish(channelFor(sub, symbol), event); err != nil {
+		log.Printf("stonks: %v", err)
 	}
 }
 
