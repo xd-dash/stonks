@@ -65,7 +65,7 @@ type streamConfig struct {
 }
 
 // validate normalizes and checks the request, returning the config a
-// Runtime needs to build its Alpaca subscriptions.
+// StonksRuntime needs to build its Alpaca subscriptions.
 func (req StreamRequest) validate() (streamConfig, error) {
 	tickers, err := validateTickers(req.Tickers)
 	if err != nil {

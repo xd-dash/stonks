@@ -6,14 +6,15 @@
 // the stream connects to logma-serverless, which subscribes to those
 // channels and fans them out over SSE.
 //
-// Runtime embeds pubsub.ServiceRuntime, which owns the single
+// StonksRuntime embeds pubsub.Runtime, which owns the single
 // *redis.Client (used for exactly two things: Publish for outbound
 // market data, and Subscribe for its control:shutdown/control:add
 // channels, auto-namespaced by pubsub/channels -- "stonks:..." under
 // K_SERVICE, or in local dev/tests) and the whole
-// claim/register-invocation/subscribe/teardown orchestration. Runtime
-// itself only supplies its own state (the Alpaca stream client) and
-// the handlers/work function that are genuinely stonks-specific.
+// claim/register-invocation/subscribe/teardown orchestration.
+// StonksRuntime itself only supplies its own state (the Alpaca stream
+// client) and the handlers/work function that are genuinely
+// stonks-specific.
 package router
 
 import (
@@ -28,39 +29,39 @@ import (
 	"github.com/xd-dash/logma-serverless/pubsub"
 )
 
-// Runtime is a container-global, single-owner actor: it owns one Alpaca
-// stream connection, plus (via the embedded ServiceRuntime) the Redis
-// client and claim/lifecycle/control-plane machinery shared with every
-// other fixed-channel-set service. Claim() is a defensive guard against
-// a second request driving the same runtime concurrently; the actual
-// guarantee comes from the Cloud Function's
+// StonksRuntime is a container-global, single-owner actor: it owns one
+// Alpaca stream connection, plus (via the embedded pubsub.Runtime) the
+// Redis client and claim/lifecycle/control-plane machinery shared with
+// every other fixed-channel-set service. Claim() is a defensive guard
+// against a second request driving the same runtime concurrently; the
+// actual guarantee comes from the Cloud Function's
 // maxInstanceRequestConcurrency=1 configuration.
-type Runtime struct {
-	pubsub.ServiceRuntime
+type StonksRuntime struct {
+	pubsub.Runtime
 
 	streamClient *stream.StocksClient
 	cfg          streamConfig
 }
 
-// NewRuntime builds a Runtime wired to REDIS_URI/REDISCLI_AUTH. It does
-// not connect to Redis or Alpaca, and has no stream configuration, until
-// Configure and Start are called.
-func NewRuntime() *Runtime {
-	return &Runtime{ServiceRuntime: pubsub.NewServiceRuntime(pubsub.NewClientFromEnv())}
+// NewStonksRuntime builds a StonksRuntime wired to REDIS_URI/REDISCLI_AUTH.
+// It does not connect to Redis or Alpaca, and has no stream
+// configuration, until Configure and Start are called.
+func NewStonksRuntime() *StonksRuntime {
+	return &StonksRuntime{Runtime: pubsub.NewRuntime(pubsub.NewClientFromEnv())}
 }
 
-// Configure wires this Runtime's Alpaca stream client to cfg and
-// declares the ServiceSpec the embedded ServiceRuntime's Start will
+// Configure wires this StonksRuntime's Alpaca stream client to cfg and
+// declares the ServiceSpec the embedded pubsub.Runtime's Start will
 // run: which control channels it listens on (control:shutdown gets the
 // default parse-log-Cancel handler every such channel wants;
 // control:add is genuinely stonks-specific) and streamAlpaca as the
 // actual work. It must be called exactly once, after a successful
 // Claim and before Start.
-func (rt *Runtime) Configure(cfg streamConfig) {
+func (rt *StonksRuntime) Configure(cfg streamConfig) {
 	rt.cfg = cfg
 	rt.streamClient = stream.NewStocksClient(cfg.feed, rt.streamOptions()...)
 
-	rt.ServiceRuntime.Configure(pubsub.ServiceSpec{
+	rt.Runtime.Configure(pubsub.ServiceSpec{
 		Channels: pubsub.ChannelHandlers{
 			rt.ShutdownChannel(): rt.DefaultShutdownHandler(),
 			rt.AddChannel():      rt.handleAdd,
@@ -69,7 +70,7 @@ func (rt *Runtime) Configure(cfg streamConfig) {
 	})
 }
 
-func (rt *Runtime) streamOptions() []stream.StockOption {
+func (rt *StonksRuntime) streamOptions() []stream.StockOption {
 	opts := make([]stream.StockOption, 0, len(rt.cfg.subscriptions)+1)
 	if key, secret := os.Getenv("ALPACA_API_KEY_ID"), os.Getenv("ALPACA_API_SECRET_KEY"); key != "" && secret != "" {
 		opts = append(opts, stream.WithCredentials(key, secret))
@@ -89,12 +90,12 @@ func (rt *Runtime) streamOptions() []stream.StockOption {
 	return opts
 }
 
-func (rt *Runtime) onTrade(t stream.Trade)  { rt.publish(subTrades, t.Symbol, t) }
-func (rt *Runtime) onQuote(q stream.Quote)  { rt.publish(subQuotes, q.Symbol, q) }
-func (rt *Runtime) onBar(b stream.Bar)      { rt.publish(subBars, b.Symbol, b) }
-func (rt *Runtime) onDailyBar(b stream.Bar) { rt.publish(subDailyBars, b.Symbol, b) }
+func (rt *StonksRuntime) onTrade(t stream.Trade)  { rt.publish(subTrades, t.Symbol, t) }
+func (rt *StonksRuntime) onQuote(q stream.Quote)  { rt.publish(subQuotes, q.Symbol, q) }
+func (rt *StonksRuntime) onBar(b stream.Bar)      { rt.publish(subBars, b.Symbol, b) }
+func (rt *StonksRuntime) onDailyBar(b stream.Bar) { rt.publish(subDailyBars, b.Symbol, b) }
 
-func (rt *Runtime) publish(sub subscriptionType, symbol string, event any) {
+func (rt *StonksRuntime) publish(sub subscriptionType, symbol string, event any) {
 	data, err := json.Marshal(event)
 	if err != nil {
 		log.Printf("stonks: failed to marshal %s event for %s: %v", sub, symbol, err)
@@ -111,7 +112,7 @@ func (rt *Runtime) publish(sub subscriptionType, symbol string, event any) {
 // the Alpaca stream and block until ctx is done (the default
 // control:shutdown handler called Cancel, or the claiming request's own
 // context ended) or the connection terminates on its own.
-func (rt *Runtime) streamAlpaca(ctx context.Context) error {
+func (rt *StonksRuntime) streamAlpaca(ctx context.Context) error {
 	if err := rt.streamClient.Connect(ctx); err != nil {
 		return fmt.Errorf("failed to connect to Alpaca stream: %w", err)
 	}
@@ -134,7 +135,7 @@ func (rt *Runtime) streamAlpaca(ctx context.Context) error {
 // Start. It's only ever called sequentially from the single
 // control:add subscriber goroutine, so it never calls the SDK's
 // subscription-change methods concurrently with itself.
-func (rt *Runtime) handleAdd(payload string) {
+func (rt *StonksRuntime) handleAdd(payload string) {
 	var request AddTickersRequest
 	if err := json.Unmarshal([]byte(payload), &request); err != nil {
 		log.Printf("stonks: invalid add-tickers message: %v", err)
