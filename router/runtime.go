@@ -41,24 +41,32 @@ type StonksRuntime struct {
 
 	streamClient *stream.StocksClient
 	cfg          streamConfig
+	credentials  *alpacaCredentials
+	alpacaSecret string
 }
 
-// NewStonksRuntime builds a StonksRuntime wired to REDIS_URI/REDISCLI_AUTH.
-// It does not connect to Redis or Alpaca, and has no stream
-// configuration, until Configure and Start are called.
-func NewStonksRuntime() *StonksRuntime {
-	return &StonksRuntime{Runtime: pubsub.NewRuntimeFromEnv()}
+// NewStonksRuntime builds a StonksRuntime wired to REDIS_URI/REDISCLI_AUTH
+// and creds -- the container's lazily-loaded Alpaca secret cache. It
+// does not connect to Redis or Alpaca, and has no stream configuration,
+// until Configure and Start are called.
+func NewStonksRuntime(creds *alpacaCredentials) *StonksRuntime {
+	return &StonksRuntime{
+		Runtime:     pubsub.NewRuntimeFromEnv(),
+		credentials: creds,
+	}
 }
 
 // Configure wires this StonksRuntime's Alpaca stream client to cfg and
-// declares, via ConfigureDefault, the ServiceSpec the embedded
-// pubsub.Runtime's Start will run: control:add (the only channel
-// genuinely stonks-specific -- control:shutdown's handling is the
-// embedded Runtime's default) and streamAlpaca as the actual work. It
-// must be called exactly once, after a successful Claim and before
-// Start.
-func (rt *StonksRuntime) Configure(cfg streamConfig) {
+// alpacaSecret (resolved by requireAlpacaAuth from the request's headers
+// or this container's cache), and declares, via ConfigureDefault, the
+// ServiceSpec the embedded pubsub.Runtime's Start will run: control:add
+// (the only channel genuinely stonks-specific -- control:shutdown's
+// handling is the embedded Runtime's default) and streamAlpaca as the
+// actual work. It must be called exactly once, after a successful Claim
+// and before Start.
+func (rt *StonksRuntime) Configure(cfg streamConfig, alpacaSecret string) {
 	rt.cfg = cfg
+	rt.alpacaSecret = alpacaSecret
 	rt.streamClient = stream.NewStocksClient(cfg.feed, rt.streamOptions()...)
 
 	rt.Runtime.ConfigureDefault(rt.streamAlpaca, pubsub.ChannelHandlers{
@@ -68,8 +76,8 @@ func (rt *StonksRuntime) Configure(cfg streamConfig) {
 
 func (rt *StonksRuntime) streamOptions() []stream.StockOption {
 	opts := make([]stream.StockOption, 0, len(rt.cfg.subscriptions)+1)
-	if key, secret := os.Getenv("ALPACA_API_KEY_ID"), os.Getenv("ALPACA_API_SECRET_KEY"); key != "" && secret != "" {
-		opts = append(opts, stream.WithCredentials(key, secret))
+	if key := os.Getenv("ALPACA_API_KEY_ID"); key != "" && rt.alpacaSecret != "" {
+		opts = append(opts, stream.WithCredentials(key, rt.alpacaSecret))
 	}
 	for _, sub := range rt.cfg.subscriptions {
 		switch sub {
@@ -103,6 +111,7 @@ func (rt *StonksRuntime) publish(sub subscriptionType, symbol string, event any)
 // context ended) or the connection terminates on its own.
 func (rt *StonksRuntime) streamAlpaca(ctx context.Context) error {
 	if err := rt.streamClient.Connect(ctx); err != nil {
+		rt.credentials.clear()
 		return fmt.Errorf("failed to connect to Alpaca stream: %w", err)
 	}
 	log.Printf("stonks: connected to Alpaca stream (instance=%s feed=%s tickers=%v)", rt.InstanceID, rt.cfg.feed, rt.cfg.tickers)
@@ -112,6 +121,7 @@ func (rt *StonksRuntime) streamAlpaca(ctx context.Context) error {
 		return nil
 	case err := <-rt.streamClient.Terminated():
 		if err != nil {
+			rt.credentials.clear()
 			return fmt.Errorf("Alpaca stream terminated: %w", err)
 		}
 		return nil

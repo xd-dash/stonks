@@ -16,9 +16,10 @@ import (
 // runtime is single-use: once a session's StonksRuntime finishes, the
 // next request gets a fresh one.
 func NewRouter() http.Handler {
-	holder := pubsub.NewHolder(NewStonksRuntime)
+	creds := &alpacaCredentials{}
+	holder := pubsub.NewHolder(func() *StonksRuntime { return NewStonksRuntime(creds) })
 
 	return baserouter.Build(func(r chi.Router) {
-		r.Post("/stream", streamHandler(holder))
+		r.With(requireAlpacaAuth(creds)).Post("/stream", streamHandler(holder))
 	})
 }
