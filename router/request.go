@@ -49,8 +49,8 @@ func channelFor(t subscriptionType, symbol string) string {
 // StreamRequest is the POST /stream body: which tickers to stream, from
 // which feed, and which event types to subscribe to. Alpaca credentials
 // are never part of this body -- they come from the server's
-// APCA_API_KEY_ID/APCA_API_SECRET_KEY environment, read automatically by
-// the SDK.
+// ALPACA_API_KEY_ID/ALPACA_API_SECRET_KEY environment, passed explicitly
+// to the SDK via stream.WithCredentials.
 type StreamRequest struct {
 	Tickers       []string `json:"tickers"`
 	Feed          string   `json:"feed"`

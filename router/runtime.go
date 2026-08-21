@@ -8,11 +8,12 @@
 //
 // Runtime embeds pubsub.ServiceRuntime, which owns the single
 // *redis.Client (used for exactly two things: Publish for outbound
-// market data, and Subscribe for stonks:control:shutdown/
-// stonks:control:add) and the whole claim/register-invocation/
-// subscribe/teardown orchestration. Runtime itself only supplies its
-// own state (the Alpaca stream client) and the handlers/work function
-// that are genuinely stonks-specific.
+// market data, and Subscribe for its control:shutdown/control:add
+// channels, auto-namespaced by pubsub/channels -- "stonks:..." under
+// K_SERVICE, or in local dev/tests) and the whole
+// claim/register-invocation/subscribe/teardown orchestration. Runtime
+// itself only supplies its own state (the Alpaca stream client) and
+// the handlers/work function that are genuinely stonks-specific.
 package router
 
 import (
@@ -20,21 +21,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 
 	"github.com/alpacahq/alpaca-trade-api-go/v3/marketdata/stream"
 
 	"github.com/xd-dash/logma-serverless/pubsub"
-)
-
-// Base control channel names, namespaced under "stonks" so they don't
-// collide with any other service's control channels sharing the same
-// Redis instance. Each is scoped in two ways by the embedded
-// ServiceRuntime: publish to its instance channel to target only this
-// container, or to its global channel to reach every stonks Runtime
-// currently listening.
-var (
-	shutdownControlChannel = pubsub.DefaultChannel("stonks", "shutdown")
-	addControlChannel      = pubsub.DefaultChannel("stonks", "add")
 )
 
 // Runtime is a container-global, single-owner actor: it owns one Alpaca
@@ -71,15 +62,18 @@ func (rt *Runtime) Configure(cfg streamConfig) {
 
 	rt.ServiceRuntime.Configure(pubsub.ServiceSpec{
 		Channels: pubsub.ChannelHandlers{
-			shutdownControlChannel: rt.DefaultShutdownHandler("stonks"),
-			addControlChannel:      rt.handleAdd,
+			rt.ShutdownChannel(): rt.DefaultShutdownHandler(),
+			rt.AddChannel():      rt.handleAdd,
 		},
 		Work: rt.streamAlpaca,
 	})
 }
 
 func (rt *Runtime) streamOptions() []stream.StockOption {
-	opts := make([]stream.StockOption, 0, len(rt.cfg.subscriptions))
+	opts := make([]stream.StockOption, 0, len(rt.cfg.subscriptions)+1)
+	if key, secret := os.Getenv("ALPACA_API_KEY_ID"), os.Getenv("ALPACA_API_SECRET_KEY"); key != "" && secret != "" {
+		opts = append(opts, stream.WithCredentials(key, secret))
+	}
 	for _, sub := range rt.cfg.subscriptions {
 		switch sub {
 		case subTrades:
