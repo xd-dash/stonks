@@ -6,14 +6,36 @@ channel instead of returning it over the same HTTP connection. See
 `router/` for the implementation:
 
 - `POST /stream` — body: `{"tickers": ["AAPL","SPY"], "feed": "iex",
-  "subscriptions": ["trades","quotes","bars"]}` (`feed` and
-  `subscriptions` are optional). The request blocks for the life of the
-  stream, ending on client disconnect, a `stonks:control:shutdown`
-  publish, or a terminal Alpaca error.
-- Events are published to `stonks:<type>:<SYMBOL>`, e.g.
-  `stonks:trade:AAPL`, `stonks:quote:AAPL`, `stonks:bar:SPY`,
-  `stonks:dailybar:SPY` — deterministic from the request, so a consumer
-  doesn't need a response from stonks before subscribing.
+  "subscriptions": ["trades","quotes","bars"], "combined_channels":
+  ["quotes"]}` (`feed`, `subscriptions`, and `combined_channels` are all
+  optional). The request blocks for the life of the stream, ending on
+  client disconnect, a `stonks:control:shutdown` publish, or a terminal
+  Alpaca error.
+- `subscriptions` picks which of four event types to stream, each with
+  different timing: `trades` (every executed trade print), `quotes`
+  (every NBBO best-bid/ask change — can fire far more often than once a
+  second for a liquid ticker), `bars` (one aggregated OHLCV candle per
+  ticker per minute — the only one that's actually interval-based), and
+  `dailybars` (one candle per ticker per day). Omitting `subscriptions`
+  defaults to `["bars"]`.
+- By default, each (type, ticker) pair gets its own channel:
+  `stonks:<type>:<SYMBOL>`, e.g. `stonks:trade:AAPL`, `stonks:quote:AAPL`,
+  `stonks:bar:SPY`, `stonks:dailybar:SPY`. Listing a type in
+  `combined_channels` makes every requested ticker's events for that type
+  land on one shared channel instead: `stonks:<type>:combined:<SYMBOL1>:
+  <SYMBOL2>:...` (tickers sorted alphabetically), e.g.
+  `{"tickers":["AAPL","MSFT"],"subscriptions":["quotes"],
+  "combined_channels":["quotes"]}` publishes every quote for both tickers
+  to `stonks:quote:combined:AAPL:MSFT`. Either way, the channel name is
+  further suffixed with `:<instanceID>` — see below.
+- Every channel is scoped to the specific container instance producing
+  it (`:<instanceID>` appended, e.g. `stonks:quote:AAPL:<instanceID>`),
+  since more than one container can be streaming the same ticker/type at
+  once and a subscriber needs to tell the resulting streams apart. A
+  consumer discovers which instance IDs are currently live via the
+  `instance:stonks:<instanceID>:<requestID>` Redis hash stonks writes at
+  stream start (see `pubsub.RegisterInvocation` in
+  `github.com/xd-dash/logma-serverless/pubsub`).
 - Consumers watch that data by connecting to
   [logma-serverless](https://github.com/xd-dash/logma-serverless), which
   subscribes to Redis channels and fans them out over SSE. stonks is
