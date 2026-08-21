@@ -24,8 +24,8 @@ body:
 
 - `REDIS_URI` / `REDISCLI_AUTH` — Redis connection (shared convention
   with logma-serverless, via `github.com/xd-dash/logma-serverless/pubsub`).
-- `APCA_API_KEY_ID` / `APCA_API_SECRET_KEY` — Alpaca credentials, read
-  automatically by the Alpaca SDK.
+- `ALPACA_API_KEY_ID` / `ALPACA_API_SECRET_KEY` — Alpaca credentials,
+  passed explicitly to the SDK via `stream.WithCredentials`.
 
 `router.NewRouter()` returns a plain `http.Handler` — the `func
 NewRouter() http.Handler` contract [gospace-minimal](https://github.com/dash-xd/gospace-minimal)
