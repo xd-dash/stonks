@@ -16,6 +16,7 @@ package router
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 
@@ -120,36 +121,44 @@ func (rt *Runtime) Start(ctx context.Context) {
 	rt.Begin(ctx, rt.run)
 }
 
+// run declares this Runtime's ServiceSpec -- which control channels it
+// listens on and what actually does the work -- and hands it to the
+// embedded ControlPlane.Run, which owns recording invocation info,
+// wiring every channel's instance+global subscriptions, and tearing
+// them down once streamAlpaca returns. Nothing here is orchestration:
+// it's config plus the two handlers/work function that are genuinely
+// stonks-specific.
 func (rt *Runtime) run() {
-	// Recorded via plain Redis commands before the client issues its
-	// first Subscribe below -- once it does, this client is never
-	// used for anything but Publish/Subscribe again.
-	if err := pubsub.RegisterInvocation(rt.Context(), rt.Client, rt.invocation); err != nil {
-		log.Printf("stonks: failed to record invocation info: %v", err)
+	if err := rt.Run(rt.Context(), pubsub.ServiceSpec{
+		Invocation: rt.invocation,
+		Channels: pubsub.ChannelHandlers{
+			shutdownControlChannel: rt.handleShutdown,
+			addControlChannel:      rt.handleAdd,
+		},
+		Work: rt.streamAlpaca,
+	}); err != nil {
+		log.Printf("stonks: %v", err)
 	}
+}
 
-	shutdownInstance, shutdownRelay := rt.ControlPlane.Subscribe(rt.Context(), shutdownControlChannel, rt.handleShutdown)
-	addInstance, addRelay := rt.ControlPlane.Subscribe(rt.Context(), addControlChannel, rt.handleAdd)
-	defer func() {
-		rt.Cancel()
-		<-shutdownInstance.Stopped()
-		<-shutdownRelay.Stopped()
-		<-addInstance.Stopped()
-		<-addRelay.Stopped()
-	}()
-
-	if err := rt.streamClient.Connect(rt.Context()); err != nil {
-		log.Printf("stonks: failed to connect to Alpaca stream: %v", err)
-		return
+// streamAlpaca is the Work half of run's ServiceSpec: connect to the
+// Alpaca stream and block until ctx is done (a control:shutdown handler
+// called Cancel, or the claiming request's own context ended) or the
+// connection terminates on its own.
+func (rt *Runtime) streamAlpaca(ctx context.Context) error {
+	if err := rt.streamClient.Connect(ctx); err != nil {
+		return fmt.Errorf("failed to connect to Alpaca stream: %w", err)
 	}
 	log.Printf("stonks: connected to Alpaca stream (instance=%s feed=%s tickers=%v)", rt.InstanceID, rt.cfg.feed, rt.cfg.tickers)
 
 	select {
-	case <-rt.Context().Done():
+	case <-ctx.Done():
+		return nil
 	case err := <-rt.streamClient.Terminated():
 		if err != nil {
-			log.Printf("stonks: Alpaca stream terminated: %v", err)
+			return fmt.Errorf("Alpaca stream terminated: %w", err)
 		}
+		return nil
 	}
 }
 
