@@ -6,10 +6,11 @@
 // the stream connects to logma-serverless, which subscribes to those
 // channels and fans them out over SSE.
 //
-// The single *redis.Client a Runtime owns is used for exactly two
-// things: Publish for outbound market data, and a Subscribe (via the
-// shared pubsub package) on stonks:control:shutdown for its own
-// lifecycle. It never issues any other Redis command.
+// The single *redis.Client a Runtime owns (via the embedded
+// pubsub.ControlPlane) is used for exactly two things: Publish for
+// outbound market data, and Subscribe (via the shared pubsub package)
+// on stonks:control:shutdown/stonks:control:add for its own lifecycle
+// and ticker management. It never issues any other Redis command.
 package router
 
 import (
@@ -21,14 +22,15 @@ import (
 	"sync/atomic"
 
 	"github.com/alpacahq/alpaca-trade-api-go/v3/marketdata/stream"
-	"github.com/redis/go-redis/v9"
 
 	"github.com/xd-dash/logma-serverless/pubsub"
 )
 
-// Fixed, global channel names -- publishing to them affects every stonks
-// Runtime currently listening, the same broadcast semantics
-// logma-serverless's own control:add/control:shutdown channels have.
+// Base control channel names. Each is scoped in two ways by the
+// embedded pubsub.ControlPlane: publish to its instance channel to
+// target only this container, or to its global channel to reach every
+// stonks Runtime currently listening -- the same instance/global split
+// logma-serverless's own control:add/control:shutdown channels use.
 const (
 	shutdownControlChannel = "stonks:control:shutdown"
 	addControlChannel      = "stonks:control:add"
@@ -53,7 +55,8 @@ type ShutdownRequest struct {
 // concurrently; the actual guarantee comes from the Cloud Function's
 // maxInstanceRequestConcurrency=1 configuration.
 type Runtime struct {
-	client       *redis.Client
+	pubsub.ControlPlane
+
 	streamClient *stream.StocksClient
 	cfg          streamConfig
 
@@ -74,10 +77,10 @@ func NewRuntime() *Runtime {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &Runtime{
-		client: pubsub.NewClientFromEnv(),
-		ctx:    ctx,
-		cancel: cancel,
-		done:   make(chan struct{}),
+		ControlPlane: pubsub.NewControlPlane(pubsub.NewClientFromEnv()),
+		ctx:          ctx,
+		cancel:       cancel,
+		done:         make(chan struct{}),
 	}
 }
 
@@ -118,7 +121,7 @@ func (rt *Runtime) publish(sub subscriptionType, symbol string, event any) {
 	}
 
 	channel := channelFor(sub, symbol)
-	if err := rt.client.Publish(rt.ctx, channel, data).Err(); err != nil {
+	if err := rt.Client.Publish(rt.ctx, channel, data).Err(); err != nil {
 		log.Printf("stonks: failed to publish to %s: %v", channel, err)
 	}
 }
@@ -170,23 +173,25 @@ func (rt *Runtime) Start(ctx context.Context) {
 		// Recorded via plain Redis commands before the client issues its
 		// first Subscribe below -- once it does, this client is never
 		// used for anything but Publish/Subscribe again.
-		if err := pubsub.RegisterInvocation(rt.ctx, rt.client, rt.invocation); err != nil {
+		if err := pubsub.RegisterInvocation(rt.ctx, rt.Client, rt.invocation); err != nil {
 			log.Printf("stonks: failed to record invocation info: %v", err)
 		}
 
-		shutdown := pubsub.Subscribe(rt.ctx, rt.client, shutdownControlChannel, rt.handleShutdown)
-		add := pubsub.Subscribe(rt.ctx, rt.client, addControlChannel, rt.handleAdd)
+		shutdownInstance, shutdownRelay := rt.ControlPlane.Subscribe(rt.ctx, shutdownControlChannel, rt.handleShutdown)
+		addInstance, addRelay := rt.ControlPlane.Subscribe(rt.ctx, addControlChannel, rt.handleAdd)
 		defer func() {
 			rt.cancel()
-			<-shutdown.Stopped()
-			<-add.Stopped()
+			<-shutdownInstance.Stopped()
+			<-shutdownRelay.Stopped()
+			<-addInstance.Stopped()
+			<-addRelay.Stopped()
 		}()
 
 		if err := rt.streamClient.Connect(rt.ctx); err != nil {
 			log.Printf("stonks: failed to connect to Alpaca stream: %v", err)
 			return
 		}
-		log.Printf("stonks: connected to Alpaca stream (feed=%s tickers=%v)", rt.cfg.feed, rt.cfg.tickers)
+		log.Printf("stonks: connected to Alpaca stream (instance=%s feed=%s tickers=%v)", rt.InstanceID, rt.cfg.feed, rt.cfg.tickers)
 
 		select {
 		case <-rt.ctx.Done():
