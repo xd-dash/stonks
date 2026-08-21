@@ -24,8 +24,21 @@ body:
 
 - `REDIS_URI` / `REDISCLI_AUTH` — Redis connection (shared convention
   with logma-serverless, via `github.com/xd-dash/logma-serverless/pubsub`).
-- `ALPACA_API_KEY_ID` / `ALPACA_API_SECRET_KEY` — Alpaca credentials,
-  passed explicitly to the SDK via `stream.WithCredentials`.
+- `ALPACA_API_KEY_ID` — the non-secret Alpaca API key, still a
+  GitHub-secret-backed env var. The Alpaca *secret* key is never an env
+  var or GitHub secret at all — see below.
+
+Every `POST /stream` must also authenticate itself with two headers,
+checked by router-level middleware before the request body is ever read:
+
+- `X-Alpaca-Api-Key-Id` — must equal the `ALPACA_API_KEY_ID` env var, on
+  every request.
+- `X-Alpaca-Api-Secret-Key` — the Alpaca secret key. Only required on the
+  first request since this container instance started (or since Alpaca
+  last rejected the cached secret) — stonks caches it in memory for the
+  rest of that container's lifetime, so later requests only need to
+  repeat `X-Alpaca-Api-Key-Id`. A request missing a required header, or
+  sending the wrong API key, gets `401 Unauthorized`.
 
 `router.NewRouter()` returns a plain `http.Handler` — the `func
 NewRouter() http.Handler` contract [gospace-minimal](https://github.com/dash-xd/gospace-minimal)

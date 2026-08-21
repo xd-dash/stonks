@@ -19,10 +19,20 @@ func TestNewRouterHasNoRootRoute(t *testing.T) {
 	}
 }
 
+func newAuthenticatedStreamRequest(t *testing.T, body string) *http.Request {
+	t.Helper()
+	t.Setenv("ALPACA_API_KEY_ID", "test-key")
+
+	req := httptest.NewRequest(http.MethodPost, "/stream", strings.NewReader(body))
+	req.Header.Set(headerAPIKeyID, "test-key")
+	req.Header.Set(headerAPISecretKey, "test-secret")
+	return req
+}
+
 func TestStreamHandlerRejectsInvalidJSON(t *testing.T) {
 	r := NewRouter()
 
-	req := httptest.NewRequest(http.MethodPost, "/stream", strings.NewReader("not json"))
+	req := newAuthenticatedStreamRequest(t, "not json")
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
@@ -34,7 +44,7 @@ func TestStreamHandlerRejectsInvalidJSON(t *testing.T) {
 func TestStreamHandlerRejectsEmptyTickers(t *testing.T) {
 	r := NewRouter()
 
-	req := httptest.NewRequest(http.MethodPost, "/stream", strings.NewReader(`{"tickers":[]}`))
+	req := newAuthenticatedStreamRequest(t, `{"tickers":[]}`)
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
@@ -46,7 +56,7 @@ func TestStreamHandlerRejectsEmptyTickers(t *testing.T) {
 func TestStreamHandlerRejectsUnsupportedFeed(t *testing.T) {
 	r := NewRouter()
 
-	req := httptest.NewRequest(http.MethodPost, "/stream", strings.NewReader(`{"tickers":["AAPL"],"feed":"nasdaq"}`))
+	req := newAuthenticatedStreamRequest(t, `{"tickers":["AAPL"],"feed":"nasdaq"}`)
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 

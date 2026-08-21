@@ -35,7 +35,7 @@ func streamHandler(holder *pubsub.Holder[*StonksRuntime]) http.HandlerFunc {
 			return
 		}
 		rt.RecordInvocation(r, middleware.GetReqID(r.Context()))
-		rt.Configure(cfg)
+		rt.Configure(cfg, alpacaSecretFromContext(r.Context()))
 
 		rt.Start(r.Context())
 
