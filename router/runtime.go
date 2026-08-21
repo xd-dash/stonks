@@ -6,45 +6,34 @@
 // the stream connects to logma-serverless, which subscribes to those
 // channels and fans them out over SSE.
 //
-// The single *redis.Client a Runtime owns is used for exactly two
-// things: Publish for outbound market data, and a Subscribe (via the
-// shared pubsub package) on stonks:control:shutdown for its own
-// lifecycle. It never issues any other Redis command.
+// The single *redis.Client a Runtime owns (via the embedded
+// pubsub.ControlPlane) is used for exactly two things: Publish for
+// outbound market data, and Subscribe (via the shared pubsub package)
+// on stonks:control:shutdown/stonks:control:add for its own lifecycle
+// and ticker management. It never issues any other Redis command.
 package router
 
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
-	"sync"
-	"sync/atomic"
 
 	"github.com/alpacahq/alpaca-trade-api-go/v3/marketdata/stream"
-	"github.com/redis/go-redis/v9"
 
 	"github.com/xd-dash/logma-serverless/pubsub"
 )
 
-// Fixed, global channel names -- publishing to them affects every stonks
-// Runtime currently listening, the same broadcast semantics
-// logma-serverless's own control:add/control:shutdown channels have.
+// Base control channel names. Each is scoped in two ways by the
+// embedded pubsub.ControlPlane: publish to its instance channel to
+// target only this container, or to its global channel to reach every
+// stonks Runtime currently listening -- the same instance/global split
+// logma-serverless's own control:add/control:shutdown channels use.
 const (
 	shutdownControlChannel = "stonks:control:shutdown"
 	addControlChannel      = "stonks:control:add"
 )
-
-const (
-	runtimeStateIdle int32 = iota
-	runtimeStateRunning
-	runtimeStateDone
-)
-
-// ShutdownRequest is the payload published to stonks:control:shutdown to
-// end a running stream.
-type ShutdownRequest struct {
-	Reason string `json:"reason"`
-}
 
 // Runtime is a container-global, single-owner actor: it owns one Alpaca
 // stream connection and the Redis client used for both its outbound
@@ -53,31 +42,22 @@ type ShutdownRequest struct {
 // concurrently; the actual guarantee comes from the Cloud Function's
 // maxInstanceRequestConcurrency=1 configuration.
 type Runtime struct {
-	client       *redis.Client
+	pubsub.ControlPlane
+	pubsub.Session
+
 	streamClient *stream.StocksClient
 	cfg          streamConfig
 
-	ctx    context.Context
-	cancel context.CancelFunc
-	done   chan struct{}
-
 	invocation pubsub.InvocationInfo
-
-	state     atomic.Int32
-	startOnce sync.Once
 }
 
 // NewRuntime builds a Runtime wired to REDIS_URI/REDISCLI_AUTH. It does
 // not connect to Redis or Alpaca, and has no stream configuration, until
 // Configure and Start are called.
 func NewRuntime() *Runtime {
-	ctx, cancel := context.WithCancel(context.Background())
-
 	return &Runtime{
-		client: pubsub.NewClientFromEnv(),
-		ctx:    ctx,
-		cancel: cancel,
-		done:   make(chan struct{}),
+		ControlPlane: pubsub.NewControlPlane(pubsub.NewClientFromEnv()),
+		Session:      pubsub.NewSession(),
 	}
 }
 
@@ -118,7 +98,7 @@ func (rt *Runtime) publish(sub subscriptionType, symbol string, event any) {
 	}
 
 	channel := channelFor(sub, symbol)
-	if err := rt.client.Publish(rt.ctx, channel, data).Err(); err != nil {
+	if err := rt.Client.Publish(rt.Context(), channel, data).Err(); err != nil {
 		log.Printf("stonks: failed to publish to %s: %v", channel, err)
 	}
 }
@@ -131,82 +111,61 @@ func (rt *Runtime) RecordInvocation(r *http.Request, requestID string) {
 	rt.invocation = pubsub.InvocationInfoFromRequest(r, requestID)
 }
 
-// Claim attempts to take exclusive ownership of the runtime for the
-// calling request. It returns false if the runtime has already been
-// claimed or has already run to completion.
-func (rt *Runtime) Claim() bool {
-	return rt.state.CompareAndSwap(runtimeStateIdle, runtimeStateRunning)
-}
-
-// Done returns a channel that's closed once Start has returned.
-func (rt *Runtime) Done() <-chan struct{} {
-	return rt.done
-}
-
-// Cancel ends the runtime's lifetime, causing Start to return. It's safe
-// to call multiple times and from any goroutine.
-func (rt *Runtime) Cancel() {
-	rt.cancel()
-}
-
 // Start connects to the Alpaca stream and blocks until ctx is cancelled,
 // a stonks:control:shutdown message is received, or the Alpaca
-// connection terminates on its own. It must only be called once
-// (guarded by startOnce -- a second call is a no-op that returns
-// immediately), and Configure must have been called first.
+// connection terminates on its own. It must only be called once -- a
+// second call is a no-op that returns immediately (guarded by the
+// embedded Session.Begin, which also provides Claim/Done/Cancel) -- and
+// Configure must have been called first.
 func (rt *Runtime) Start(ctx context.Context) {
-	rt.startOnce.Do(func() {
-		defer rt.state.Store(runtimeStateDone)
-		defer close(rt.done)
+	rt.Begin(ctx, rt.run)
+}
 
-		go func() {
-			select {
-			case <-ctx.Done():
-				rt.cancel()
-			case <-rt.ctx.Done():
-			}
-		}()
+// run declares this Runtime's ServiceSpec -- which control channels it
+// listens on and what actually does the work -- and hands it to the
+// embedded ControlPlane.Run, which owns recording invocation info,
+// wiring every channel's instance+global subscriptions, and tearing
+// them down once streamAlpaca returns. Nothing here is orchestration:
+// it's config plus the two handlers/work function that are genuinely
+// stonks-specific.
+func (rt *Runtime) run() {
+	if err := rt.Run(rt.Context(), pubsub.ServiceSpec{
+		Invocation: rt.invocation,
+		Channels: pubsub.ChannelHandlers{
+			shutdownControlChannel: rt.handleShutdown,
+			addControlChannel:      rt.handleAdd,
+		},
+		Work: rt.streamAlpaca,
+	}); err != nil {
+		log.Printf("stonks: %v", err)
+	}
+}
 
-		// Recorded via plain Redis commands before the client issues its
-		// first Subscribe below -- once it does, this client is never
-		// used for anything but Publish/Subscribe again.
-		if err := pubsub.RegisterInvocation(rt.ctx, rt.client, rt.invocation); err != nil {
-			log.Printf("stonks: failed to record invocation info: %v", err)
+// streamAlpaca is the Work half of run's ServiceSpec: connect to the
+// Alpaca stream and block until ctx is done (a control:shutdown handler
+// called Cancel, or the claiming request's own context ended) or the
+// connection terminates on its own.
+func (rt *Runtime) streamAlpaca(ctx context.Context) error {
+	if err := rt.streamClient.Connect(ctx); err != nil {
+		return fmt.Errorf("failed to connect to Alpaca stream: %w", err)
+	}
+	log.Printf("stonks: connected to Alpaca stream (instance=%s feed=%s tickers=%v)", rt.InstanceID, rt.cfg.feed, rt.cfg.tickers)
+
+	select {
+	case <-ctx.Done():
+		return nil
+	case err := <-rt.streamClient.Terminated():
+		if err != nil {
+			return fmt.Errorf("Alpaca stream terminated: %w", err)
 		}
-
-		shutdown := pubsub.Subscribe(rt.ctx, rt.client, shutdownControlChannel, rt.handleShutdown)
-		add := pubsub.Subscribe(rt.ctx, rt.client, addControlChannel, rt.handleAdd)
-		defer func() {
-			rt.cancel()
-			<-shutdown.Stopped()
-			<-add.Stopped()
-		}()
-
-		if err := rt.streamClient.Connect(rt.ctx); err != nil {
-			log.Printf("stonks: failed to connect to Alpaca stream: %v", err)
-			return
-		}
-		log.Printf("stonks: connected to Alpaca stream (feed=%s tickers=%v)", rt.cfg.feed, rt.cfg.tickers)
-
-		select {
-		case <-rt.ctx.Done():
-		case err := <-rt.streamClient.Terminated():
-			if err != nil {
-				log.Printf("stonks: Alpaca stream terminated: %v", err)
-			}
-		}
-	})
+		return nil
+	}
 }
 
 func (rt *Runtime) handleShutdown(payload string) {
-	var request ShutdownRequest
-	if payload != "" {
-		if err := json.Unmarshal([]byte(payload), &request); err != nil {
-			log.Printf("stonks: invalid shutdown message: %v", err)
-		}
-	}
+	request := pubsub.ParseShutdownRequest(payload)
 	log.Printf("stonks: shutting down runtime: reason=%q", request.Reason)
-	rt.cancel()
+	rt.Cancel()
 }
 
 // handleAdd hot-adds tickers to the already-connected Alpaca stream, in

@@ -5,8 +5,7 @@ go 1.26
 require (
 	github.com/alpacahq/alpaca-trade-api-go/v3 v3.11.0
 	github.com/go-chi/chi/v5 v5.3.1
-	github.com/redis/go-redis/v9 v9.22.0
-	github.com/xd-dash/logma-serverless v0.0.0-20260820065434-d63a77f710b5
+	github.com/xd-dash/logma-serverless v0.0.0-20260821010632-e2e2b324804d
 )
 
 require (
@@ -15,6 +14,7 @@ require (
 	github.com/coder/websocket v1.8.12 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
+	github.com/redis/go-redis/v9 v9.22.0 // indirect
 	github.com/shopspring/decimal v1.3.1 // indirect
 	github.com/vmihailenco/msgpack/v5 v5.3.0 // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
