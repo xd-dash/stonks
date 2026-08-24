@@ -10,13 +10,17 @@
 #
 # The instanceID segment is chosen by stonks itself at stream start (its
 # Cloud Run container hostname -- see gospace-minimal's InstanceID) and
-# can't be predicted ahead of time, so this script discovers it the same
-# way any real consumer has to: read the
+# can't be predicted ahead of time, so by default this script discovers it
+# the same way any real consumer has to: read the
 # instance:<K_SERVICE>:<instanceID>:<requestID> Redis hash stonks writes
 # via pubsub.RegisterInvocation as soon as its stream starts (see
 # router/runtime.go's Configure -> Start -> pubsub.Runtime.Run), then
 # passes the resulting fully-qualified channel names to logma-serverless's
-# GET /events?channel=... .
+# GET /events?channel=... . With --global-channels (stonks deployed with
+# STONKS_GLOBAL_CHANNELS=true -- see router/runtime.go's publishChannel),
+# the channel suffix is the literal "global" instead of a discovered
+# instance ID, so this whole discovery step -- and Redis access generally
+# -- is skipped entirely.
 #
 # Requires this deployment pairing to be run through huram-abi's
 # deploy-stonks-router workflow with deploy_logma_serverless left on (the
@@ -48,11 +52,18 @@
 #                             connection open collecting events (default: 20).
 #
 # Flags:
-#   --stonks-public   Skip the Authorization: Bearer header when calling
-#                      stonks (it was deployed with allow_unauthenticated=true).
-#                      logma-serverless never needs this: deploy-logma-serverless
-#                      always deploys it with --allow-unauthenticated (auth is
-#                      handled at the application layer there, not GCP IAM).
+#   --stonks-public     Skip the Authorization: Bearer header when calling
+#                       stonks (it was deployed with allow_unauthenticated=true).
+#                       logma-serverless never needs this: deploy-logma-serverless
+#                       always deploys it with --allow-unauthenticated (auth is
+#                       handled at the application layer there, not GCP IAM).
+#   --global-channels   stonks was deployed with STONKS_GLOBAL_CHANNELS=true,
+#                       so its channels end in :global instead of a live,
+#                       only-discoverable-after-the-fact instance ID -- skips
+#                       the Redis instance-discovery step entirely and
+#                       computes channel names directly from
+#                       STREAM_TICKERS/STREAM_SUBSCRIPTIONS. REDIS_URI/
+#                       REDISCLI_AUTH and redis-cli aren't needed in this mode.
 #   -h, --help
 #
 # Caveats:
@@ -77,18 +88,26 @@ DISCOVERY_TIMEOUT_SECONDS="${DISCOVERY_TIMEOUT_SECONDS:-20}"
 SSE_TIMEOUT_SECONDS="${SSE_TIMEOUT_SECONDS:-20}"
 
 STONKS_PUBLIC=false
+GLOBAL_CHANNELS=false
 
 usage() {
-    echo "Usage: $0 [--stonks-public]"
+    echo "Usage: $0 [--stonks-public] [--global-channels]"
     echo
     echo "  --stonks-public    Skip stonks's Authorization: Bearer header"
     echo "                     (it was deployed with allow_unauthenticated=true)."
+    echo "  --global-channels  stonks was deployed with STONKS_GLOBAL_CHANNELS=true;"
+    echo "                     skip Redis instance discovery and compute channel"
+    echo "                     names directly (no REDIS_URI/redis-cli needed)."
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --stonks-public)
             STONKS_PUBLIC=true
+            shift
+            ;;
+        --global-channels)
+            GLOBAL_CHANNELS=true
             shift
             ;;
         -h|--help)
@@ -103,14 +122,22 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-for required in ALPACA_API_KEY_ID ALPACA_API_SECRET_KEY REDIS_URI; do
+required_vars=(ALPACA_API_KEY_ID ALPACA_API_SECRET_KEY)
+if [[ "$GLOBAL_CHANNELS" != true ]]; then
+    required_vars+=(REDIS_URI)
+fi
+for required in "${required_vars[@]}"; do
     if [[ -z "${!required:-}" ]]; then
         echo "ERROR: $required must be set." >&2
         exit 1
     fi
 done
 
-for tool in redis-cli jq curl gcloud; do
+tools=(jq curl gcloud)
+if [[ "$GLOBAL_CHANNELS" != true ]]; then
+    tools+=(redis-cli)
+fi
+for tool in "${tools[@]}"; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "ERROR: $tool is required on PATH." >&2
         exit 1
@@ -166,7 +193,9 @@ cleanup() {
 trap cleanup EXIT
 
 # --- snapshot instance-registration keys before starting a new stream ---
-BASELINE_KEYS="$(redis_cli --scan --pattern "instance:${STONKS_SERVICE_NAME}:*" | sort)"
+if [[ "$GLOBAL_CHANNELS" != true ]]; then
+    BASELINE_KEYS="$(redis_cli --scan --pattern "instance:${STONKS_SERVICE_NAME}:*" | sort)"
+fi
 
 # --- build the /stream request body ---
 tickers_json="$(printf '%s\n' "${STREAM_TICKERS//,/$'\n'}" | jq -R . | jq -sc .)"
@@ -189,31 +218,36 @@ curl --silent --show-error --output "${WORKDIR}/stonks-response.log" \
 STONKS_PID=$!
 
 # --- discover the instance ID this stream just registered ---
-echo "--- discovering stonks instance ID (up to ${DISCOVERY_TIMEOUT_SECONDS}s) ---"
+CHANNEL_SUFFIX=""
+if [[ "$GLOBAL_CHANNELS" == true ]]; then
+    echo "--- STONKS_GLOBAL_CHANNELS mode: skipping instance discovery ---"
+    CHANNEL_SUFFIX="global"
+else
+    echo "--- discovering stonks instance ID (up to ${DISCOVERY_TIMEOUT_SECONDS}s) ---"
 
-INSTANCE_ID=""
-deadline=$((SECONDS + DISCOVERY_TIMEOUT_SECONDS))
-while (( SECONDS < deadline )); do
-    if ! kill -0 "$STONKS_PID" 2>/dev/null; then
-        echo "FAIL: stonks stream exited before an instance ID could be discovered:" >&2
-        cat "${WORKDIR}/stonks-response.log" >&2
+    deadline=$((SECONDS + DISCOVERY_TIMEOUT_SECONDS))
+    while (( SECONDS < deadline )); do
+        if ! kill -0 "$STONKS_PID" 2>/dev/null; then
+            echo "FAIL: stonks stream exited before an instance ID could be discovered:" >&2
+            cat "${WORKDIR}/stonks-response.log" >&2
+            exit 1
+        fi
+
+        current_keys="$(redis_cli --scan --pattern "instance:${STONKS_SERVICE_NAME}:*" | sort)"
+        new_key="$(comm -13 <(printf '%s\n' "$BASELINE_KEYS") <(printf '%s\n' "$current_keys") | head -n1)"
+        if [[ -n "$new_key" ]]; then
+            CHANNEL_SUFFIX="$(redis_cli HGET "$new_key" instance_id)"
+            break
+        fi
+        sleep 1
+    done
+
+    if [[ -z "$CHANNEL_SUFFIX" ]]; then
+        echo "FAIL: no new instance:${STONKS_SERVICE_NAME}:* key appeared within ${DISCOVERY_TIMEOUT_SECONDS}s." >&2
         exit 1
     fi
-
-    current_keys="$(redis_cli --scan --pattern "instance:${STONKS_SERVICE_NAME}:*" | sort)"
-    new_key="$(comm -13 <(printf '%s\n' "$BASELINE_KEYS") <(printf '%s\n' "$current_keys") | head -n1)"
-    if [[ -n "$new_key" ]]; then
-        INSTANCE_ID="$(redis_cli HGET "$new_key" instance_id)"
-        break
-    fi
-    sleep 1
-done
-
-if [[ -z "$INSTANCE_ID" ]]; then
-    echo "FAIL: no new instance:${STONKS_SERVICE_NAME}:* key appeared within ${DISCOVERY_TIMEOUT_SECONDS}s." >&2
-    exit 1
+    echo "PASS: discovered stonks instance ID: ${CHANNEL_SUFFIX}"
 fi
-echo "PASS: discovered stonks instance ID: ${INSTANCE_ID}"
 
 # --- derive the exact channel names stonks publishes to (router/subscriptions.go) ---
 # Built into a query string directly (percent-encoded via jq's @uri, no
@@ -233,7 +267,7 @@ for sub in "${sub_types[@]}"; do
         *) echo "WARN: unrecognized subscription type '$sub', skipping" >&2; continue ;;
     esac
     for ticker in "${tickers[@]}"; do
-        channel="stonks:${channel_type}:${ticker}:${INSTANCE_ID}"
+        channel="stonks:${channel_type}:${ticker}:${CHANNEL_SUFFIX}"
         encoded_channel="$(jq -rn --arg c "$channel" '$c|@uri')"
         query="${query}&channel=${encoded_channel}"
         echo "watching channel: ${channel}"

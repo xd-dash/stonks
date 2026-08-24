@@ -36,6 +36,13 @@ channel instead of returning it over the same HTTP connection. See
   `instance:stonks:<instanceID>:<requestID>` Redis hash stonks writes at
   stream start (see `pubsub.RegisterInvocation` in
   `github.com/xd-dash/logma-serverless/pubsub`).
+  With `STONKS_GLOBAL_CHANNELS=true` (below), the suffix is the literal
+  `global` instead — only for a deployment that's a dedicated,
+  single-instance pairing with one consumer, where that disambiguation
+  isn't needed and a channel name computable ahead of any deploy is more
+  useful (e.g. so a paired logma-serverless instance can be given the
+  right `REDIS_DEFAULT_SUBSCRIPTIONS` at deploy time, with no runtime
+  discovery step).
 - Consumers watch that data by connecting to
   [logma-serverless](https://github.com/xd-dash/logma-serverless), which
   subscribes to Redis channels and fans them out over SSE. stonks is
@@ -54,6 +61,10 @@ body:
 - `ALPACA_API_KEY_ID` — the non-secret Alpaca API key, still a
   GitHub-secret-backed env var. The Alpaca *secret* key is never an env
   var or GitHub secret at all — see below.
+- `STONKS_GLOBAL_CHANNELS` — set to `true` to publish on the `:global`
+  channel suffix described above instead of the per-instance one. Defaults
+  to unset (instance-scoped, the safe default for any deployment that
+  might ever run more than one concurrent instance).
 
 Every `POST /stream` must also authenticate itself with two headers,
 checked by router-level middleware before the request body is ever read:

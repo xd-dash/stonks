@@ -5,10 +5,13 @@
 // either one channel per (type, symbol) pair (stonks:<type>:<SYMBOL>) or,
 // for a type listed in the request's combined_channels, one channel
 // shared by every requested ticker (stonks:<type>:combined:<SYMBOL1>:
-// <SYMBOL2>:...). Either way the channel is scoped to the specific
-// container instance producing it (a ":<instanceID>" suffix, via the
-// same InstanceChannel every control channel already uses), since more
+// <SYMBOL2>:...). Either way the channel is by default scoped to the
+// specific container instance producing it (a ":<instanceID>" suffix, via
+// the same InstanceChannel every control channel already uses), since more
 // than one container can be streaming the same ticker/type at once.
+// STONKS_GLOBAL_CHANNELS opts a deployment out of that suffix instead (see
+// StonksRuntime.publish) for the dedicated-single-instance case where it
+// isn't needed and a deploy-time-computable channel name is more useful.
 // Anyone who wants to watch the stream connects to logma-serverless,
 // which subscribes to those channels and fans them out over SSE.
 //
@@ -45,20 +48,25 @@ import (
 type StonksRuntime struct {
 	pubsub.Runtime
 
-	streamClient *stream.StocksClient
-	cfg          streamConfig
-	credentials  *alpacaCredentials
-	alpacaSecret string
+	streamClient   *stream.StocksClient
+	cfg            streamConfig
+	credentials    *alpacaCredentials
+	alpacaSecret   string
+	globalChannels bool
 }
 
 // NewStonksRuntime builds a StonksRuntime wired to REDIS_URI/REDISCLI_AUTH
 // and creds -- the container's lazily-loaded Alpaca secret cache. It
 // does not connect to Redis or Alpaca, and has no stream configuration,
 // until Configure and Start are called.
+//
+// globalChannels is read from STONKS_GLOBAL_CHANNELS ("true" to enable):
+// see publish's doc comment for what it changes and why it defaults off.
 func NewStonksRuntime(creds *alpacaCredentials) *StonksRuntime {
 	return &StonksRuntime{
-		Runtime:     pubsub.NewRuntimeFromEnv(),
-		credentials: creds,
+		Runtime:        pubsub.NewRuntimeFromEnv(),
+		credentials:    creds,
+		globalChannels: os.Getenv("STONKS_GLOBAL_CHANNELS") == "true",
 	}
 }
 
@@ -106,10 +114,33 @@ func (rt *StonksRuntime) onBar(b stream.Bar)      { rt.publish(subBars, b.Symbol
 func (rt *StonksRuntime) onDailyBar(b stream.Bar) { rt.publish(subDailyBars, b.Symbol, b) }
 
 func (rt *StonksRuntime) publish(sub subscriptionType, symbol string, event any) {
-	channel := rt.InstanceChannel(rt.baseChannel(sub, symbol))
+	channel := rt.publishChannel(sub, symbol)
 	if err := rt.Runtime.Publish(channel, event); err != nil {
 		log.Printf("stonks: %v", err)
 	}
+}
+
+// publishChannel scopes baseChannel's result to this specific container
+// instance by default (InstanceChannel), since more than one container can
+// be streaming the same ticker/type at once and a subscriber needs to tell
+// the resulting streams apart -- see the package doc. With
+// STONKS_GLOBAL_CHANNELS set, it returns the deployment-wide GlobalChannel
+// variant instead (already reachable here via the embedded pubsub.Runtime
+// -> ControlPlane, with no other plumbing needed): safe only for a
+// deployment that's a dedicated, single-instance pairing with one consumer
+// (e.g. a CI pipeline that deploys one stonks-router + one logma-serverless
+// per ticker list), where the instance-disambiguation InstanceChannel
+// exists for doesn't apply -- and valuable there specifically because it
+// makes the channel name a pure function of (type, symbol), computable
+// before this container even starts, so a consumer's default subscriptions
+// can be set up ahead of time instead of discovering a live instance ID
+// first.
+func (rt *StonksRuntime) publishChannel(sub subscriptionType, symbol string) string {
+	base := rt.baseChannel(sub, symbol)
+	if rt.globalChannels {
+		return rt.GlobalChannel(base)
+	}
+	return rt.InstanceChannel(base)
 }
 
 // baseChannel picks channelFor (per-symbol) or combinedChannelFor
