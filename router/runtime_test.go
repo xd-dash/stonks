@@ -1,6 +1,10 @@
 package router
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/xd-dash/logma-serverless/pubsub"
+)
 
 func TestBaseChannelUsesPerSymbolWhenNotCombined(t *testing.T) {
 	rt := &StonksRuntime{cfg: streamConfig{tickers: []string{"AAPL", "MSFT"}}}
@@ -35,5 +39,48 @@ func TestBaseChannelOnlyCombinesConfiguredTypes(t *testing.T) {
 	want := "stonks:bar:AAPL"
 	if got := rt.baseChannel(subBars, "AAPL"); got != want {
 		t.Fatalf("baseChannel(subBars, AAPL) = %q, want %q (bars weren't combined)", got, want)
+	}
+}
+
+func TestPublishChannelUsesInstanceScopeByDefault(t *testing.T) {
+	rt := &StonksRuntime{
+		Runtime: pubsub.NewRuntime(nil),
+		cfg:     streamConfig{tickers: []string{"AAPL"}},
+	}
+
+	want := "stonks:trade:AAPL:" + rt.InstanceID
+	if got := rt.publishChannel(subTrades, "AAPL"); got != want {
+		t.Fatalf("publishChannel(subTrades, AAPL) = %q, want %q", got, want)
+	}
+}
+
+func TestPublishChannelUsesGlobalScopeWhenEnabled(t *testing.T) {
+	rt := &StonksRuntime{
+		Runtime:        pubsub.NewRuntime(nil),
+		cfg:            streamConfig{tickers: []string{"AAPL"}},
+		globalChannels: true,
+	}
+
+	want := "stonks:trade:AAPL:global"
+	if got := rt.publishChannel(subTrades, "AAPL"); got != want {
+		t.Fatalf("publishChannel(subTrades, AAPL) = %q, want %q", got, want)
+	}
+}
+
+func TestNewStonksRuntimePicksUpGlobalChannelsFromEnv(t *testing.T) {
+	t.Setenv("STONKS_GLOBAL_CHANNELS", "true")
+
+	rt := NewStonksRuntime(&alpacaCredentials{})
+	if !rt.globalChannels {
+		t.Fatal("expected NewStonksRuntime to read STONKS_GLOBAL_CHANNELS=true from the environment")
+	}
+}
+
+func TestNewStonksRuntimeDefaultsGlobalChannelsToFalse(t *testing.T) {
+	t.Setenv("STONKS_GLOBAL_CHANNELS", "")
+
+	rt := NewStonksRuntime(&alpacaCredentials{})
+	if rt.globalChannels {
+		t.Fatal("expected NewStonksRuntime to default globalChannels to false")
 	}
 }
