@@ -46,11 +46,11 @@ body:
 
 - `REDIS_URI` / `REDISCLI_AUTH` — Redis connection (shared convention
   with logma-serverless, via `github.com/xd-dash/logma-serverless/pubsub`).
-  If `REDISCLI_AUTH` is left unset, the first request's `X-Rediscli-Auth`
-  header is used instead (see `pubsub.NewClientFromRequest`) — for a
-  deployment that intentionally leaves the env var unconfigured and
-  expects each caller to supply Redis credentials itself. `REDIS_URI`
-  itself has no such fallback; it must always come from the environment.
+  If either is left unset, the first request's `X-Redis-Uri` /
+  `X-Rediscli-Auth` header is used instead (see
+  `pubsub.NewClientFromRequest`), independently of one another — for a
+  deployment that intentionally leaves one or both env vars unconfigured
+  and expects each caller to supply them itself.
 - `ALPACA_API_KEY_ID` — the non-secret Alpaca API key, still a
   GitHub-secret-backed env var. The Alpaca *secret* key is never an env
   var or GitHub secret at all — see below.

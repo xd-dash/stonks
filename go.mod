@@ -5,7 +5,7 @@ go 1.26
 require (
 	github.com/alpacahq/alpaca-trade-api-go/v3 v3.11.0
 	github.com/go-chi/chi/v5 v5.3.1
-	github.com/xd-dash/logma-serverless v0.0.0-20260824162846-3edb616b1724
+	github.com/xd-dash/logma-serverless v0.0.0-20260824163542-90475a42115c
 )
 
 require (
