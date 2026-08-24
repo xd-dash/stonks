@@ -37,12 +37,8 @@ github.com/vmihailenco/msgpack/v5 v5.3.0 h1:8G3at/kelmBKeHY6d6cKnGsYO3BLn+uubitd
 github.com/vmihailenco/msgpack/v5 v5.3.0/go.mod h1:7xyJ9e+0+9SaZT0Wt1RGleJXzli6Q/V5KbhBonMG9jc=
 github.com/vmihailenco/tagparser/v2 v2.0.0 h1:y09buUbR+b5aycVFQs/g70pqKVZNBmxwAhO7/IwNM9g=
 github.com/vmihailenco/tagparser/v2 v2.0.0/go.mod h1:Wri+At7QHww0WTrCBeu4J6bNtoV6mEfg5OIWRZA9qds=
-github.com/xd-dash/logma-serverless v0.0.0-20260821015412-213f870b1eca h1:AD5V0mqTUoLl1ug0KZwlLd42yKnG9Azyv5K0Z2ebPts=
-github.com/xd-dash/logma-serverless v0.0.0-20260821015412-213f870b1eca/go.mod h1:M19AWuY/qog6p2dOh2Z53Pnu+FU9EFkOR9m2kj+tB/U=
-github.com/xd-dash/logma-serverless v0.0.0-20260821022353-bc491e04e85b h1:j7J0qAZ4u8dhkHvwjXiLfTDrnzlDuibkUGQY1X7JICM=
-github.com/xd-dash/logma-serverless v0.0.0-20260821022353-bc491e04e85b/go.mod h1:M19AWuY/qog6p2dOh2Z53Pnu+FU9EFkOR9m2kj+tB/U=
-github.com/xd-dash/logma-serverless v0.0.0-20260821023055-27ac2fd7127f h1:N53oaREW3wR7Kfj0VaJP2KKs0tOppC/5uM7U1JKXLVs=
-github.com/xd-dash/logma-serverless v0.0.0-20260821023055-27ac2fd7127f/go.mod h1:M19AWuY/qog6p2dOh2Z53Pnu+FU9EFkOR9m2kj+tB/U=
+github.com/xd-dash/logma-serverless v0.0.0-20260824162846-3edb616b1724 h1:6ErAvEvbQgboY/ZaZ3Nn7NjWGOV/zJH/SuzRR3yDLz8=
+github.com/xd-dash/logma-serverless v0.0.0-20260824162846-3edb616b1724/go.mod h1:M19AWuY/qog6p2dOh2Z53Pnu+FU9EFkOR9m2kj+tB/U=
 github.com/zeebo/xxh3 v1.1.0 h1:s7DLGDK45Dyfg7++yxI0khrfwq9661w9EN78eP/UZVs=
 github.com/zeebo/xxh3 v1.1.0/go.mod h1:IisAie1LELR4xhVinxWS5+zf1lA4p0MW4T+w+W07F5s=
 go.uber.org/atomic v1.11.0 h1:ZvwS0R+56ePWxUNi+Atn9dWONBPp/AUETXlHW0DxSjE=
