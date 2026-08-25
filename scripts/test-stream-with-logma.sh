@@ -41,9 +41,15 @@
 #   ALPACA_API_KEY_ID         Must match the deployed stonks function's ALPACA_API_KEY_ID.
 #   ALPACA_API_SECRET_KEY     Real Alpaca secret key, for the actual stream request.
 #   REDIS_URI                 host:port of the same Redis instance both functions share.
-#                             Required to discover stonks's live instance ID.
+#                             Required to discover stonks's live instance ID
+#                             (not needed with --global-channels).
 #   REDISCLI_AUTH             Redis auth password/token, read natively by redis-cli
-#                             (same env var name the deployed functions themselves use).
+#                             (same env var name the deployed functions themselves use)
+#                             and sent as the X-Rediscli-Auth header on the GET /events
+#                             request -- logma-serverless requires this header to match
+#                             its own REDISCLI_AUTH, its only application-level auth
+#                             check (see its router.requireRedisAuth). Always required,
+#                             including with --global-channels.
 #   STREAM_TICKERS            Comma-separated tickers to stream (default: AAPL).
 #   STREAM_SUBSCRIPTIONS      Comma-separated subscription types (default: trades,quotes).
 #   DISCOVERY_TIMEOUT_SECONDS How long to wait for stonks's instance-registration
@@ -55,15 +61,17 @@
 #   --stonks-public     Skip the Authorization: Bearer header when calling
 #                       stonks (it was deployed with allow_unauthenticated=true).
 #                       logma-serverless never needs this: deploy-logma-serverless
-#                       always deploys it with --allow-unauthenticated (auth is
-#                       handled at the application layer there, not GCP IAM).
+#                       always deploys it with --allow-unauthenticated at the GCP
+#                       IAM layer -- its own auth is handled at the application
+#                       layer instead, via the X-Rediscli-Auth header below.
 #   --global-channels   stonks was deployed with STONKS_GLOBAL_CHANNELS=true,
 #                       so its channels end in :global instead of a live,
 #                       only-discoverable-after-the-fact instance ID -- skips
 #                       the Redis instance-discovery step entirely and
 #                       computes channel names directly from
-#                       STREAM_TICKERS/STREAM_SUBSCRIPTIONS. REDIS_URI/
-#                       REDISCLI_AUTH and redis-cli aren't needed in this mode.
+#                       STREAM_TICKERS/STREAM_SUBSCRIPTIONS. REDIS_URI and
+#                       redis-cli aren't needed in this mode -- REDISCLI_AUTH
+#                       still is, to authenticate to logma-serverless itself.
 #   -h, --help
 #
 # Caveats:
@@ -122,7 +130,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-required_vars=(ALPACA_API_KEY_ID ALPACA_API_SECRET_KEY)
+required_vars=(ALPACA_API_KEY_ID ALPACA_API_SECRET_KEY REDISCLI_AUTH)
 if [[ "$GLOBAL_CHANNELS" != true ]]; then
     required_vars+=(REDIS_URI)
 fi
@@ -282,6 +290,7 @@ echo "--- collecting SSE events from logma-serverless for ${SSE_TIMEOUT_SECONDS}
 
 set +e
 timeout "${SSE_TIMEOUT_SECONDS}" curl --silent --show-error --no-buffer \
+    -H "X-Rediscli-Auth: ${REDISCLI_AUTH}" \
     "$events_url" >"${WORKDIR}/sse-events.log" 2>"${WORKDIR}/sse-curl.err"
 curl_exit=$?
 set -e
