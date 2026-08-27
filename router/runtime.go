@@ -15,14 +15,13 @@
 // Anyone who wants to watch the stream connects to logma-serverless,
 // which subscribes to those channels and fans them out over SSE.
 //
-// StonksRuntime embeds pubsub.Runtime, which owns the single
-// *redis.Client (used for exactly two things: Publish for outbound
-// market data, and Subscribe for its control:shutdown/control:add
-// channels, auto-namespaced by pubsub/channels -- "stonks:..." under
-// K_SERVICE, or in local dev/tests) and the whole
-// claim/register-invocation/subscribe/teardown orchestration.
-// StonksRuntime itself only supplies its own state (the Alpaca stream
-// client) and the handlers/work function that are genuinely
+// StonksRuntime embeds pubsub.Runtime, which owns the per-session
+// *redis.Client (used for exactly two things: Publish for outbound market
+// data, and Subscribe for its control:shutdown/control:add channels,
+// auto-namespaced by pubsub/channels -- "stonks:..." under K_SERVICE, or
+// in local dev/tests) and the whole claim/register-invocation/subscribe/
+// teardown orchestration. StonksRuntime itself only supplies its own state
+// (the Alpaca stream client) and the handlers/work that are genuinely
 // stonks-specific.
 package router
 
@@ -32,19 +31,23 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sync"
 
 	"github.com/alpacahq/alpaca-trade-api-go/v3/marketdata/stream"
 
 	"github.com/xd-dash/logma-serverless/pubsub"
 )
 
-// StonksRuntime is a container-global, single-owner actor: it owns one
-// Alpaca stream connection, plus (via the embedded pubsub.Runtime) the
-// Redis client and claim/lifecycle/control-plane machinery shared with
-// every other fixed-channel-set service. Claim() is a defensive guard
-// against a second request driving the same runtime concurrently; the
-// actual guarantee comes from the Cloud Function's
-// maxInstanceRequestConcurrency=1 configuration.
+// StonksRuntime is a session-scoped, single-owner actor. It owns one Alpaca
+// stream connection and one Redis client, plus (via the embedded
+// pubsub.Runtime) the claim/lifecycle/control-plane machinery shared with
+// every other fixed-channel-set service. A container may run many
+// StonksRuntimes sequentially; each completed runtime is discarded and its
+// Redis client is explicitly closed before the request returns.
+//
+// Claim() is a defensive guard against a second request driving the same
+// runtime concurrently; the deployment-level guarantee still comes from the
+// Cloud Function's maxInstanceRequestConcurrency=1 configuration.
 type StonksRuntime struct {
 	pubsub.Runtime
 
@@ -53,12 +56,13 @@ type StonksRuntime struct {
 	credentials    *alpacaCredentials
 	alpacaSecret   string
 	globalChannels bool
+	closeOnce      sync.Once
 }
 
 // NewStonksRuntime builds a StonksRuntime wired to REDIS_URI/REDISCLI_AUTH
-// and creds -- the container's lazily-loaded Alpaca secret cache. It
-// does not connect to Redis or Alpaca, and has no stream configuration,
-// until Configure and Start are called.
+// and creds -- the container's lazily-loaded Alpaca secret cache. It does not
+// connect to Redis or Alpaca, and has no stream configuration, until
+// Configure and Start are called.
 //
 // globalChannels is read from STONKS_GLOBAL_CHANNELS ("true" to enable):
 // see publish's doc comment for what it changes and why it defaults off.
@@ -70,14 +74,30 @@ func NewStonksRuntime(creds *alpacaCredentials) *StonksRuntime {
 	}
 }
 
+// Close releases resources owned by this stream session. It is idempotent so
+// callers can safely defer it immediately after Claim succeeds. By the time
+// Start returns, ControlPlane.Run has already cancelled and joined every
+// Redis control subscriber; streamAlpaca also waits for Alpaca's termination
+// signal on cancellation, so no callback goroutine should still be publishing
+// when the Redis client is closed here.
+func (rt *StonksRuntime) Close() {
+	rt.closeOnce.Do(func() {
+		if rt.Client == nil {
+			return
+		}
+		if err := rt.Client.Close(); err != nil {
+			log.Printf("stonks: close redis client: %v", err)
+		}
+	})
+}
+
 // Configure wires this StonksRuntime's Alpaca stream client to cfg and
-// alpacaSecret (resolved by requireAlpacaAuth from the request's headers
-// or this container's cache), and declares, via ConfigureDefault, the
-// ServiceSpec the embedded pubsub.Runtime's Start will run: control:add
-// (the only channel genuinely stonks-specific -- control:shutdown's
-// handling is the embedded Runtime's default) and streamAlpaca as the
-// actual work. It must be called exactly once, after a successful Claim
-// and before Start.
+// alpacaSecret (resolved by requireAlpacaAuth from the request's headers or
+// this container's cache), and declares, via ConfigureDefault, the
+// ServiceSpec the embedded pubsub.Runtime's Start will run: control:add (the
+// only channel genuinely stonks-specific -- control:shutdown's handling is
+// the embedded Runtime's default) and streamAlpaca as the actual work. It
+// must be called exactly once, after a successful Claim and before Start.
 func (rt *StonksRuntime) Configure(cfg streamConfig, alpacaSecret string) {
 	rt.cfg = cfg
 	rt.alpacaSecret = alpacaSecret
@@ -125,16 +145,15 @@ func (rt *StonksRuntime) publish(sub subscriptionType, symbol string, event any)
 // be streaming the same ticker/type at once and a subscriber needs to tell
 // the resulting streams apart -- see the package doc. With
 // STONKS_GLOBAL_CHANNELS set, it returns the deployment-wide GlobalChannel
-// variant instead (already reachable here via the embedded pubsub.Runtime
-// -> ControlPlane, with no other plumbing needed): safe only for a
-// deployment that's a dedicated, single-instance pairing with one consumer
-// (e.g. a CI pipeline that deploys one stonks-router + one logma-serverless
-// per ticker list), where the instance-disambiguation InstanceChannel
-// exists for doesn't apply -- and valuable there specifically because it
-// makes the channel name a pure function of (type, symbol), computable
-// before this container even starts, so a consumer's default subscriptions
-// can be set up ahead of time instead of discovering a live instance ID
-// first.
+// variant instead (already reachable here via the embedded pubsub.Runtime ->
+// ControlPlane, with no other plumbing needed): safe only for a deployment
+// that's a dedicated, single-instance pairing with one consumer (e.g. a CI
+// pipeline that deploys one stonks-router + one logma-serverless per ticker
+// list), where the instance-disambiguation InstanceChannel exists for
+// doesn't apply -- and valuable there specifically because it makes the
+// channel name a pure function of (type, symbol), computable before this
+// container even starts, so a consumer's default subscriptions can be set up
+// ahead of time instead of discovering a live instance ID first.
 func (rt *StonksRuntime) publishChannel(sub subscriptionType, symbol string) string {
 	base := rt.baseChannel(sub, symbol)
 	if rt.globalChannels {
@@ -143,13 +162,13 @@ func (rt *StonksRuntime) publishChannel(sub subscriptionType, symbol string) str
 	return rt.InstanceChannel(base)
 }
 
-// baseChannel picks channelFor (per-symbol) or combinedChannelFor
-// (shared across every ticker in rt.cfg.tickers), per
-// rt.cfg.combined[sub]. rt.cfg.tickers is fixed at Configure time and
-// never mutated by handleAdd, so a combined channel's name stays fixed
-// to the original request's ticker set even after tickers are hot-added
-// via control:add -- the hot-added tickers' events still land on that
-// same channel, they just aren't reflected in its name.
+// baseChannel picks channelFor (per-symbol) or combinedChannelFor (shared
+// across every ticker in rt.cfg.tickers), per rt.cfg.combined[sub].
+// rt.cfg.tickers is fixed at Configure time and never mutated by handleAdd,
+// so a combined channel's name stays fixed to the original request's ticker
+// set even after tickers are hot-added via control:add -- the hot-added
+// tickers' events still land on that same channel, they just aren't reflected
+// in its name.
 func (rt *StonksRuntime) baseChannel(sub subscriptionType, symbol string) string {
 	if rt.cfg.combined[sub] {
 		return combinedChannelFor(sub, rt.cfg.tickers)
@@ -157,23 +176,42 @@ func (rt *StonksRuntime) baseChannel(sub subscriptionType, symbol string) string
 	return channelFor(sub, symbol)
 }
 
-// streamAlpaca is the Work half of Configure's ServiceSpec: connect to
-// the Alpaca stream and block until ctx is done (the default
-// control:shutdown handler called Cancel, or the claiming request's own
-// context ended) or the connection terminates on its own.
+// streamAlpaca is the Work half of Configure's ServiceSpec: connect to the
+// Alpaca stream and block until ctx is done (the default control:shutdown
+// handler called Cancel, or the claiming request's own context ended) or the
+// connection terminates on its own.
+//
+// When ctx is cancelled after a successful connection, wait for the SDK's
+// Terminated signal before returning. The SDK closes down its message
+// processors as part of that path, which gives the outer lifecycle a clean
+// happens-before edge before StonksRuntime.Close releases Redis.
 func (rt *StonksRuntime) streamAlpaca(ctx context.Context) error {
 	if err := rt.streamClient.Connect(ctx); err != nil {
-		rt.credentials.clear()
+		// A request cancellation during initial connect is not evidence that
+		// the cached credential is wrong. Preserve it in that case; otherwise
+		// retain the existing behavior so an actually rejected credential can
+		// be supplied again on the next request.
+		if ctx.Err() == nil {
+			rt.credentials.clear()
+		}
 		return fmt.Errorf("failed to connect to Alpaca stream: %w", err)
 	}
 	log.Printf("stonks: connected to Alpaca stream (instance=%s feed=%s tickers=%v)", rt.InstanceID, rt.cfg.feed, rt.cfg.tickers)
 
 	select {
 	case <-ctx.Done():
+		// Connect uses this same context to run Alpaca's connection and
+		// callback processors. Waiting here prevents late callbacks from
+		// racing session resource cleanup.
+		if err, ok := <-rt.streamClient.Terminated(); ok && err != nil {
+			log.Printf("stonks: Alpaca stream terminated while stopping: %v", err)
+		}
 		return nil
-	case err := <-rt.streamClient.Terminated():
-		if err != nil {
-			rt.credentials.clear()
+	case err, ok := <-rt.streamClient.Terminated():
+		if ok && err != nil {
+			// Authentication succeeded if we got this far; a later network or
+			// upstream failure must not invalidate the container credential
+			// cache and force the caller to resend a secret unnecessarily.
 			return fmt.Errorf("Alpaca stream terminated: %w", err)
 		}
 		return nil
@@ -181,11 +219,10 @@ func (rt *StonksRuntime) streamAlpaca(ctx context.Context) error {
 }
 
 // handleAdd hot-adds tickers to the already-connected Alpaca stream, in
-// response to a stonks:control:add publish -- the only way to add
-// tickers once POST /stream has claimed the runtime and is blocked in
-// Start. It's only ever called sequentially from the single
-// control:add subscriber goroutine, so it never calls the SDK's
-// subscription-change methods concurrently with itself.
+// response to a stonks:control:add publish -- the only way to add tickers once
+// POST /stream has claimed the runtime and is blocked in Start. It's only ever
+// called sequentially from the single control:add subscriber goroutine, so it
+// never calls the SDK's subscription-change methods concurrently with itself.
 func (rt *StonksRuntime) handleAdd(payload string) {
 	var request AddTickersRequest
 	if err := json.Unmarshal([]byte(payload), &request); err != nil {
