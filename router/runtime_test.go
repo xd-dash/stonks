@@ -1,6 +1,7 @@
 package router
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/xd-dash/logma-serverless/pubsub"
@@ -83,4 +84,32 @@ func TestNewStonksRuntimeDefaultsGlobalChannelsToFalse(t *testing.T) {
 	if rt.globalChannels {
 		t.Fatal("expected NewStonksRuntime to default globalChannels to false")
 	}
+}
+
+func TestWaitForAlpacaTerminationDrainsAndReturnsFirstError(t *testing.T) {
+	terminated := make(chan error, 2)
+	want := errors.New("first terminal error")
+	terminated <- want
+	terminated <- errors.New("later terminal error")
+	close(terminated)
+
+	if got := waitForAlpacaTermination(terminated); !errors.Is(got, want) {
+		t.Fatalf("waitForAlpacaTermination() = %v, want %v", got, want)
+	}
+}
+
+func TestWaitForAlpacaTerminationReturnsNilForCleanShutdown(t *testing.T) {
+	terminated := make(chan error, 1)
+	terminated <- nil
+	close(terminated)
+
+	if err := waitForAlpacaTermination(terminated); err != nil {
+		t.Fatalf("waitForAlpacaTermination() = %v, want nil", err)
+	}
+}
+
+func TestCloseIsIdempotentWithoutClient(t *testing.T) {
+	rt := &StonksRuntime{}
+	rt.Close()
+	rt.Close()
 }
