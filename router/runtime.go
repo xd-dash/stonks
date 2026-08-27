@@ -77,9 +77,10 @@ func NewStonksRuntime(creds *alpacaCredentials) *StonksRuntime {
 // Close releases resources owned by this stream session. It is idempotent so
 // callers can safely defer it immediately after Claim succeeds. By the time
 // Start returns, ControlPlane.Run has already cancelled and joined every
-// Redis control subscriber; streamAlpaca also waits for Alpaca's termination
-// signal on cancellation, so no callback goroutine should still be publishing
-// when the Redis client is closed here.
+// Redis control subscriber; streamAlpaca also waits until Alpaca's Terminated
+// channel is closed, which happens after the SDK's message processors have
+// stopped, so no callback goroutine should still be publishing when the Redis
+// client is closed here.
 func (rt *StonksRuntime) Close() {
 	rt.closeOnce.Do(func() {
 		if rt.Client == nil {
@@ -176,15 +177,30 @@ func (rt *StonksRuntime) baseChannel(sub subscriptionType, symbol string) string
 	return channelFor(sub, symbol)
 }
 
+// waitForAlpacaTermination drains terminated until the SDK closes it and
+// returns the first non-nil terminal error. Alpaca sends the terminal value
+// before all of maintainConnection's deferred cleanup has completed, so
+// merely receiving one value is not sufficient as a teardown barrier; channel
+// closure is the point at which its message processors have been joined.
+func waitForAlpacaTermination(terminated <-chan error) error {
+	var terminalErr error
+	for err := range terminated {
+		if terminalErr == nil && err != nil {
+			terminalErr = err
+		}
+	}
+	return terminalErr
+}
+
 // streamAlpaca is the Work half of Configure's ServiceSpec: connect to the
 // Alpaca stream and block until ctx is done (the default control:shutdown
 // handler called Cancel, or the claiming request's own context ended) or the
 // connection terminates on its own.
 //
-// When ctx is cancelled after a successful connection, wait for the SDK's
-// Terminated signal before returning. The SDK closes down its message
-// processors as part of that path, which gives the outer lifecycle a clean
-// happens-before edge before StonksRuntime.Close releases Redis.
+// In either case, do not return until Alpaca's Terminated channel is closed.
+// That makes SDK callback shutdown happen-before ControlPlane.Run tears down
+// Redis subscriptions and before the handler closes the session's Redis
+// client.
 func (rt *StonksRuntime) streamAlpaca(ctx context.Context) error {
 	if err := rt.streamClient.Connect(ctx); err != nil {
 		// A request cancellation during initial connect is not evidence that
@@ -198,21 +214,26 @@ func (rt *StonksRuntime) streamAlpaca(ctx context.Context) error {
 	}
 	log.Printf("stonks: connected to Alpaca stream (instance=%s feed=%s tickers=%v)", rt.InstanceID, rt.cfg.feed, rt.cfg.tickers)
 
+	terminated := rt.streamClient.Terminated()
 	select {
 	case <-ctx.Done():
-		// Connect uses this same context to run Alpaca's connection and
-		// callback processors. Waiting here prevents late callbacks from
-		// racing session resource cleanup.
-		if err, ok := <-rt.streamClient.Terminated(); ok && err != nil {
+		if err := waitForAlpacaTermination(terminated); err != nil {
 			log.Printf("stonks: Alpaca stream terminated while stopping: %v", err)
 		}
 		return nil
-	case err, ok := <-rt.streamClient.Terminated():
-		if ok && err != nil {
+	case err, ok := <-terminated:
+		if !ok {
+			return nil
+		}
+		terminalErr := err
+		if drainErr := waitForAlpacaTermination(terminated); terminalErr == nil {
+			terminalErr = drainErr
+		}
+		if terminalErr != nil {
 			// Authentication succeeded if we got this far; a later network or
 			// upstream failure must not invalidate the container credential
 			// cache and force the caller to resend a secret unnecessarily.
-			return fmt.Errorf("Alpaca stream terminated: %w", err)
+			return fmt.Errorf("Alpaca stream terminated: %w", terminalErr)
 		}
 		return nil
 	}
