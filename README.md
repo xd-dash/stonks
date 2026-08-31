@@ -1,83 +1,91 @@
-stonks!
+# stonks
 
-Streams Alpaca market data (trades/quotes/bars) for tickers given in a
-`POST /stream` request body, and publishes each event onto a Redis
-channel instead of returning it over the same HTTP connection. See
-`router/` for the implementation:
+`stonks` streams Alpaca market data into Redis and, for each accepted `POST /stream` request, composes Logma's `serverless` package in-process so the same request receives the selected Redis channels back as Server-Sent Events.
 
-- `POST /stream` — body: `{"tickers": ["AAPL","SPY"], "feed": "iex",
-  "subscriptions": ["trades","quotes","bars"], "combined_channels":
-  ["quotes"]}` (`feed`, `subscriptions`, and `combined_channels` are all
-  optional). The request blocks for the life of the stream, ending on
-  client disconnect, a `stonks:control:shutdown` publish, or a terminal
-  Alpaca error.
-- `subscriptions` picks which of four event types to stream, each with
-  different timing: `trades` (every executed trade print), `quotes`
-  (every NBBO best-bid/ask change — can fire far more often than once a
-  second for a liquid ticker), `bars` (one aggregated OHLCV candle per
-  ticker per minute — the only one that's actually interval-based), and
-  `dailybars` (one candle per ticker per day). Omitting `subscriptions`
-  defaults to `["bars"]`.
-- By default, each (type, ticker) pair gets its own channel:
-  `stonks:<type>:<SYMBOL>`, e.g. `stonks:trade:AAPL`, `stonks:quote:AAPL`,
-  `stonks:bar:SPY`, `stonks:dailybar:SPY`. Listing a type in
-  `combined_channels` makes every requested ticker's events for that type
-  land on one shared channel instead: `stonks:<type>:combined:<SYMBOL1>:
-  <SYMBOL2>:...` (tickers sorted alphabetically), e.g.
-  `{"tickers":["AAPL","MSFT"],"subscriptions":["quotes"],
-  "combined_channels":["quotes"]}` publishes every quote for both tickers
-  to `stonks:quote:combined:AAPL:MSFT`. Either way, the channel name is
-  further suffixed with `:<instanceID>` — see below.
-- Every channel is scoped to the specific container instance producing
-  it (`:<instanceID>` appended, e.g. `stonks:quote:AAPL:<instanceID>`),
-  since more than one container can be streaming the same ticker/type at
-  once and a subscriber needs to tell the resulting streams apart. A
-  consumer discovers which instance IDs are currently live via the
-  `instance:stonks:<instanceID>:<requestID>` Redis hash stonks writes at
-  stream start (see `pubsub.RegisterInvocation` in
-  `github.com/xd-dash/logma-serverless/pubsub`).
-  With `STONKS_GLOBAL_CHANNELS=true` (below), the suffix is the literal
-  `global` instead — only for a deployment that's a dedicated,
-  single-instance pairing with one consumer, where that disambiguation
-  isn't needed and a channel name computable ahead of any deploy is more
-  useful (e.g. so a paired logma-serverless instance can be given the
-  right `REDIS_DEFAULT_SUBSCRIPTIONS` at deploy time, with no runtime
-  discovery step).
-- Consumers watch that data by connecting to
-  [logma-serverless](https://github.com/xd-dash/logma-serverless), which
-  subscribes to Redis channels and fans them out over SSE. stonks is
-  never itself an SSE endpoint.
+The live path is:
 
-Configuration is entirely environment-based, never part of the request
-body:
+```text
+requester / GitHub Action
+        |
+        | POST /stream
+        v
+stonks
+  |- Logma serverless subscriber(s) -- subscribe first
+  |- Alpaca publisher --------------- start second
+  |
+  v
+shared Farcaster Redis / Logma runtime
+  |
+  +---------------- Redis Pub/Sub ----------------+
+                                                  |
+                                                  v
+                                      request SSE response
+```
 
-- `REDIS_URI` / `REDISCLI_AUTH` — Redis connection (shared convention
-  with logma-serverless, via `github.com/xd-dash/logma-serverless/pubsub`).
-  If either is left unset, the first request's `X-Redis-Uri` /
-  `X-Rediscli-Auth` header is used instead (see
-  `pubsub.NewClientFromRequest`), independently of one another — for a
-  deployment that intentionally leaves one or both env vars unconfigured
-  and expects each caller to supply them itself.
-- `ALPACA_API_KEY_ID` — the non-secret Alpaca API key, still a
-  GitHub-secret-backed env var. The Alpaca *secret* key is never an env
-  var or GitHub secret at all — see below.
-- `STONKS_GLOBAL_CHANNELS` — set to `true` to publish on the `:global`
-  channel suffix described above instead of the per-instance one. Defaults
-  to unset (instance-scoped, the safe default for any deployment that
-  might ever run more than one concurrent instance).
+`POST /stream` accepts:
 
-Every `POST /stream` must also authenticate itself with two headers,
-checked by router-level middleware before the request body is ever read:
+```json
+{
+  "tickers": ["AAPL", "SPY"],
+  "feed": "iex",
+  "subscriptions": ["trades", "quotes", "bars"],
+  "combined_channels": ["quotes"]
+}
+```
 
-- `X-Alpaca-Api-Key-Id` — must equal the `ALPACA_API_KEY_ID` env var, on
-  every request.
-- `X-Alpaca-Api-Secret-Key` — the Alpaca secret key. Only required on the
-  first request since this container instance started (or since Alpaca
-  last rejected the cached secret) — stonks caches it in memory for the
-  rest of that container's lifetime, so later requests only need to
-  repeat `X-Alpaca-Api-Key-Id`. A request missing a required header, or
-  sending the wrong API key, gets `401 Unauthorized`.
+`feed`, `subscriptions`, and `combined_channels` are optional. The default subscription is `bars`. Supported subscriptions are `trades`, `quotes`, `bars`, and `dailybars`.
 
-`router.NewRouter()` returns a plain `http.Handler` — the `func
-NewRouter() http.Handler` contract [gospace-minimal](https://github.com/dash-xd/gospace-minimal)
-expects for its Cloud Functions Gen 2 shell.
+The response is `text/event-stream`. Every Redis market event is emitted using Logma's normal envelope shape:
+
+```text
+event: message
+data: {"channel":"stonks:quote:AAPL:<instance>","data":{...}}
+```
+
+The handler creates the Redis subscriptions and waits for Redis to acknowledge all of them before starting the Alpaca connection. Redis Pub/Sub has no replay, so this subscriber-first ordering prevents the first Alpaca event from racing the SSE consumer into existence.
+
+If the SSE consumer cannot keep up with the bounded request buffer, the request is cancelled rather than silently dropping market data. Disconnecting the requester also cancels both the embedded Logma subscriber side and the Alpaca publisher side.
+
+## Channel shape
+
+By default each event type/symbol publishes to an instance-scoped channel such as:
+
+```text
+stonks:trade:AAPL:<instanceID>
+stonks:quote:AAPL:<instanceID>
+stonks:bar:SPY:<instanceID>
+```
+
+A type named in `combined_channels` uses one deterministic channel for the requested ticker set, for example:
+
+```text
+stonks:quote:combined:AAPL:MSFT:<instanceID>
+```
+
+`STONKS_GLOBAL_CHANNELS=true` changes the final scope to `:global`. Keep the instance-scoped default for reusable or potentially multi-instance deployments.
+
+## Runtime ownership
+
+One `stonks` service instance owns one active `/stream` request at a time. Once that request ends, the holder creates a fresh `StonksRuntime` for the next request. This preserves the existing Logma lifecycle/control-plane semantics and avoids conflating concurrent request streams under the process-level instance ID.
+
+For a retained Farcaster sandbox, Redis/Logma remain shared infrastructure. A transient `stonks` deployment owns only its own process/container and request runtime; it does not own or replace the retained Farcaster host or canonical Redis/Logma services.
+
+## Configuration
+
+Redis uses the shared Logma convention:
+
+- `REDIS_URI`
+- `REDIS_SOCKET` when using a Unix socket
+- `REDISCLI_AUTH`
+
+When Redis connection values are deliberately not supplied by the environment, Logma serverless can resolve them from its existing request headers.
+
+Alpaca authentication uses:
+
+- `ALPACA_API_KEY_ID` in the service environment
+- `X-Alpaca-Api-Key-Id` on each request
+- `X-Alpaca-Api-Secret-Key` when the container does not already hold the secret in its in-memory credential cache
+
+The Alpaca secret is not added to the SSE payload or Redis market messages.
+
+`router.NewRouter()` remains a plain `http.Handler` suitable for the existing Go serverless/container shells.
