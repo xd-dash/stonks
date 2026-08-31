@@ -6,13 +6,13 @@ require (
 	github.com/alpacahq/alpaca-trade-api-go/v3 v3.11.0
 	github.com/go-chi/chi/v5 v5.3.1
 	github.com/xd-dash/logma v0.0.0-20260831065939-f2d57b3f2e89
-	github.com/xd-dash/logma-serverless v0.0.0-20260824163542-90475a42115c
 )
 
 require (
 	cloud.google.com/go v0.118.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/coder/websocket v1.8.12 // indirect
+	github.com/dash-xd/ratelimiter v0.0.0-20260829031019-0d8f1f0d5a19 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/redis/go-redis/v9 v9.22.0 // indirect
