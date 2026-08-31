@@ -76,7 +76,7 @@ func TestOptionChannelFor(t *testing.T) {
 }
 
 func TestStreamChannelsIncludesBoundedOptionChannels(t *testing.T) {
-	rt := NewStonksRuntime(newAlpacaCredentials())
+	rt := NewStonksRuntime(&alpacaCredentials{})
 	cfg, err := (StreamRequest{
 		Tickers:             []string{"SPY"},
 		Subscriptions:       []string{"quotes"},
