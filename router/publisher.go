@@ -3,9 +3,11 @@ package router
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"sync"
 
+	"github.com/alpacahq/alpaca-trade-api-go/v3/marketdata"
 	"github.com/go-chi/chi/v5/middleware"
 )
 
@@ -16,6 +18,7 @@ type publisherManager struct {
 	mu      sync.Mutex
 	creds   *alpacaCredentials
 	runtime *StonksRuntime
+	feed    marketdata.Feed
 	started bool
 	cancel  context.CancelFunc
 }
@@ -27,7 +30,7 @@ func newPublisherManager(creds *alpacaCredentials) *publisherManager {
 // prepare returns the process-owned publisher, creating and configuring it
 // from the first request if necessary. It deliberately does not start Alpaca;
 // the caller first makes its Redis subscriptions ready, then calls activate.
-func (m *publisherManager) prepare(r *http.Request, cfg streamConfig, secret string) *StonksRuntime {
+func (m *publisherManager) prepare(r *http.Request, cfg streamConfig, secret string) (*StonksRuntime, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -36,6 +39,7 @@ func (m *publisherManager) prepare(r *http.Request, cfg streamConfig, secret str
 		case <-m.runtime.Done():
 			m.runtime = nil
 			m.started = false
+			m.feed = ""
 			if m.cancel != nil {
 				m.cancel()
 				m.cancel = nil
@@ -44,14 +48,18 @@ func (m *publisherManager) prepare(r *http.Request, cfg streamConfig, secret str
 		}
 	}
 	if m.runtime != nil {
-		return m.runtime
+		if cfg.feed != m.feed {
+			return nil, fmt.Errorf("shared publisher already uses feed %q; requested %q", m.feed, cfg.feed)
+		}
+		return m.runtime, nil
 	}
 
 	rt := NewStonksRuntime(m.creds)
 	rt.RecordInvocation(r, "publisher-"+middleware.GetReqID(r.Context()))
 	rt.Configure(cfg, secret)
 	m.runtime = rt
-	return rt
+	m.feed = cfg.feed
+	return rt, nil
 }
 
 // activate starts the retained publisher exactly once and then ensures the
