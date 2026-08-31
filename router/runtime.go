@@ -14,39 +14,42 @@ import (
 )
 
 // StonksRuntime owns the retained/shared Alpaca publisher for one stonks
-// service instance. HTTP /stream requests never own this runtime: they only
-// attach request-scoped Logma Redis subscribers to the Redis channels it publishes.
+// service instance. Stock and option feeds are separate Alpaca websocket
+// clients but one process/runtime owns both and publishes them into the same
+// scoped Redis/Logma fabric.
 type StonksRuntime struct {
 	pubsub.Runtime
 
 	streamClient   *stream.StocksClient
+	optionClient   *stream.OptionClient
 	credentials    *alpacaCredentials
 	alpacaSecret   string
 	globalChannels bool
 	replayFixture  string
 
-	mu            sync.Mutex
-	tickers       map[string]struct{}
-	subscriptions map[subscriptionType]map[string]struct{}
-	connected     chan struct{}
-	connectedOnce sync.Once
+	mu                  sync.Mutex
+	tickers             map[string]struct{}
+	subscriptions       map[subscriptionType]map[string]struct{}
+	optionContracts     map[string]struct{}
+	optionSubscriptions map[subscriptionType]map[string]struct{}
+	connected           chan struct{}
+	connectedOnce       sync.Once
 }
 
 func NewStonksRuntime(creds *alpacaCredentials) *StonksRuntime {
 	return &StonksRuntime{
-		Runtime:        pubsub.NewRuntimeFromEnv(),
-		credentials:    creds,
-		globalChannels: os.Getenv("STONKS_GLOBAL_CHANNELS") == "true",
-		replayFixture:  replayFixturePath(),
-		tickers:        make(map[string]struct{}),
-		subscriptions:  make(map[subscriptionType]map[string]struct{}),
-		connected:      make(chan struct{}),
+		Runtime:              pubsub.NewRuntimeFromEnv(),
+		credentials:          creds,
+		globalChannels:       os.Getenv("STONKS_GLOBAL_CHANNELS") == "true",
+		replayFixture:        replayFixturePath(),
+		tickers:              make(map[string]struct{}),
+		subscriptions:        make(map[subscriptionType]map[string]struct{}),
+		optionContracts:      make(map[string]struct{}),
+		optionSubscriptions: make(map[subscriptionType]map[string]struct{}),
+		connected:            make(chan struct{}),
 	}
 }
 
-// Configure initializes the shared publisher from the first request that needs
-// market data. Shared publishers always use canonical per-symbol Redis channels;
-// request-specific fan-in/selection belongs at the SSE subscriber boundary.
 func (rt *StonksRuntime) Configure(cfg streamConfig, alpacaSecret string) {
 	rt.alpacaSecret = alpacaSecret
 	cfg.combined = nil
@@ -63,6 +66,17 @@ func (rt *StonksRuntime) Configure(cfg streamConfig, alpacaSecret string) {
 			rt.subscriptions[sub][ticker] = struct{}{}
 		}
 	}
+	for _, contract := range cfg.optionContracts {
+		rt.optionContracts[contract] = struct{}{}
+	}
+	for _, sub := range cfg.optionSubscriptions {
+		if rt.optionSubscriptions[sub] == nil {
+			rt.optionSubscriptions[sub] = make(map[string]struct{})
+		}
+		for _, contract := range cfg.optionContracts {
+			rt.optionSubscriptions[sub][contract] = struct{}{}
+		}
+	}
 	rt.mu.Unlock()
 
 	streamFn := rt.streamAlpaca
@@ -70,10 +84,11 @@ func (rt *StonksRuntime) Configure(cfg streamConfig, alpacaSecret string) {
 		streamFn = rt.streamReplay
 	} else {
 		rt.streamClient = stream.NewStocksClient(cfg.feed, rt.streamOptions(cfg)...)
+		if len(cfg.optionContracts) > 0 {
+			rt.optionClient = stream.NewOptionClient(cfg.optionFeed, rt.optionOptions(cfg)...)
+		}
 	}
-	rt.Runtime.ConfigureDefault(streamFn, pubsub.ChannelHandlers{
-		rt.AddChannel(): rt.handleAdd,
-	})
+	rt.Runtime.ConfigureDefault(streamFn, pubsub.ChannelHandlers{rt.AddChannel(): rt.handleAdd})
 }
 
 func (rt *StonksRuntime) streamOptions(cfg streamConfig) []stream.StockOption {
@@ -96,15 +111,43 @@ func (rt *StonksRuntime) streamOptions(cfg streamConfig) []stream.StockOption {
 	return opts
 }
 
+func (rt *StonksRuntime) optionOptions(cfg streamConfig) []stream.OptionOption {
+	opts := make([]stream.OptionOption, 0, len(cfg.optionSubscriptions)+1)
+	if key := os.Getenv("ALPACA_API_KEY_ID"); key != "" && rt.alpacaSecret != "" {
+		opts = append(opts, stream.WithCredentials(key, rt.alpacaSecret))
+	}
+	for _, sub := range cfg.optionSubscriptions {
+		switch sub {
+		case subQuotes:
+			opts = append(opts, stream.WithOptionQuotes(rt.onOptionQuote, cfg.optionContracts...))
+		case subTrades:
+			opts = append(opts, stream.WithOptionTrades(rt.onOptionTrade, cfg.optionContracts...))
+		}
+	}
+	return opts
+}
+
 func (rt *StonksRuntime) Ready() <-chan struct{} { return rt.connected }
 
 func (rt *StonksRuntime) onTrade(t stream.Trade)  { rt.publish(subTrades, t.Symbol, t) }
 func (rt *StonksRuntime) onQuote(q stream.Quote)  { rt.publish(subQuotes, q.Symbol, q) }
 func (rt *StonksRuntime) onBar(b stream.Bar)      { rt.publish(subBars, b.Symbol, b) }
 func (rt *StonksRuntime) onDailyBar(b stream.Bar) { rt.publish(subDailyBars, b.Symbol, b) }
+func (rt *StonksRuntime) onOptionQuote(q stream.OptionQuote) {
+	rt.publishOption(subQuotes, q.Symbol, q)
+}
+func (rt *StonksRuntime) onOptionTrade(t stream.OptionTrade) {
+	rt.publishOption(subTrades, t.Symbol, t)
+}
 
 func (rt *StonksRuntime) publish(sub subscriptionType, symbol string, event any) {
 	if err := rt.Runtime.Publish(rt.publishChannel(sub, symbol), event); err != nil {
+		log.Printf("stonks: %v", err)
+	}
+}
+
+func (rt *StonksRuntime) publishOption(sub subscriptionType, contract string, event any) {
+	if err := rt.Runtime.Publish(rt.optionPublishChannel(sub, contract), event); err != nil {
 		log.Printf("stonks: %v", err)
 	}
 }
@@ -117,21 +160,32 @@ func (rt *StonksRuntime) publishChannel(sub subscriptionType, symbol string) str
 	return rt.InstanceChannel(base)
 }
 
-// streamChannels returns the canonical Redis channels a request should attach
-// to. CombinedChannels is intentionally not a publisher concern in the shared
-// runtime: different requesters can select overlapping symbol/type sets without
-// changing the one retained publisher's channel topology.
+func (rt *StonksRuntime) optionPublishChannel(sub subscriptionType, contract string) string {
+	base := optionChannelFor(sub, contract)
+	if rt.globalChannels {
+		return rt.GlobalChannel(base)
+	}
+	return rt.InstanceChannel(base)
+}
+
 func (rt *StonksRuntime) streamChannels(cfg streamConfig) []string {
 	seen := make(map[string]struct{})
-	channels := make([]string, 0, len(cfg.tickers)*len(cfg.subscriptions))
+	channels := make([]string, 0, len(cfg.tickers)*len(cfg.subscriptions)+len(cfg.optionContracts)*len(cfg.optionSubscriptions))
+	appendUnique := func(channel string) {
+		if _, ok := seen[channel]; ok {
+			return
+		}
+		seen[channel] = struct{}{}
+		channels = append(channels, channel)
+	}
 	for _, sub := range cfg.subscriptions {
 		for _, ticker := range cfg.tickers {
-			channel := rt.publishChannel(sub, ticker)
-			if _, ok := seen[channel]; ok {
-				continue
-			}
-			seen[channel] = struct{}{}
-			channels = append(channels, channel)
+			appendUnique(rt.publishChannel(sub, ticker))
+		}
+	}
+	for _, sub := range cfg.optionSubscriptions {
+		for _, contract := range cfg.optionContracts {
+			appendUnique(rt.optionPublishChannel(sub, contract))
 		}
 	}
 	return channels
@@ -140,28 +194,39 @@ func (rt *StonksRuntime) streamChannels(cfg streamConfig) []string {
 func (rt *StonksRuntime) streamAlpaca(ctx context.Context) error {
 	if err := rt.streamClient.Connect(ctx); err != nil {
 		rt.credentials.clear()
-		return fmt.Errorf("failed to connect to Alpaca stream: %w", err)
+		return fmt.Errorf("failed to connect to Alpaca stock stream: %w", err)
+	}
+	if rt.optionClient != nil {
+		if err := rt.optionClient.Connect(ctx); err != nil {
+			rt.credentials.clear()
+			return fmt.Errorf("failed to connect to Alpaca option stream: %w", err)
+		}
 	}
 	rt.connectedOnce.Do(func() { close(rt.connected) })
-	log.Printf("stonks: shared Alpaca publisher connected (instance=%s)", rt.InstanceID)
+	log.Printf("stonks: shared Alpaca publisher connected (instance=%s options=%t)", rt.InstanceID, rt.optionClient != nil)
 
+	var optionTerminated <-chan error
+	if rt.optionClient != nil {
+		optionTerminated = rt.optionClient.Terminated()
+	}
 	select {
 	case <-ctx.Done():
 		return nil
 	case err := <-rt.streamClient.Terminated():
 		if err != nil {
 			rt.credentials.clear()
-			return fmt.Errorf("Alpaca stream terminated: %w", err)
+			return fmt.Errorf("Alpaca stock stream terminated: %w", err)
+		}
+		return nil
+	case err := <-optionTerminated:
+		if err != nil {
+			rt.credentials.clear()
+			return fmt.Errorf("Alpaca option stream terminated: %w", err)
 		}
 		return nil
 	}
 }
 
-// EnsureSubscriptions expands the retained Alpaca stream for a requester.
-// Calls are serialized so the SDK's subscription mutation methods are never
-// invoked concurrently. Existing subscriptions are left untouched. In replay
-// qualification mode there is no external Alpaca subscription to mutate; the
-// same maps are still updated so fixture filtering follows request semantics.
 func (rt *StonksRuntime) EnsureSubscriptions(cfg streamConfig) error {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
@@ -172,15 +237,13 @@ func (rt *StonksRuntime) EnsureSubscriptions(cfg streamConfig) error {
 		}
 		missing := make([]string, 0, len(cfg.tickers))
 		for _, ticker := range cfg.tickers {
-			if _, exists := rt.subscriptions[sub][ticker]; exists {
-				continue
+			if _, exists := rt.subscriptions[sub][ticker]; !exists {
+				missing = append(missing, ticker)
 			}
-			missing = append(missing, ticker)
 		}
 		if len(missing) == 0 {
 			continue
 		}
-
 		if rt.replayFixture == "" {
 			var err error
 			switch sub {
@@ -200,6 +263,40 @@ func (rt *StonksRuntime) EnsureSubscriptions(cfg streamConfig) error {
 		for _, ticker := range missing {
 			rt.tickers[ticker] = struct{}{}
 			rt.subscriptions[sub][ticker] = struct{}{}
+		}
+	}
+
+	if len(cfg.optionContracts) > 0 && rt.optionClient == nil && rt.replayFixture == "" {
+		return fmt.Errorf("shared publisher was created without option streaming; restart with option_contracts in the first request")
+	}
+	for _, sub := range cfg.optionSubscriptions {
+		if rt.optionSubscriptions[sub] == nil {
+			rt.optionSubscriptions[sub] = make(map[string]struct{})
+		}
+		missing := make([]string, 0, len(cfg.optionContracts))
+		for _, contract := range cfg.optionContracts {
+			if _, exists := rt.optionSubscriptions[sub][contract]; !exists {
+				missing = append(missing, contract)
+			}
+		}
+		if len(missing) == 0 {
+			continue
+		}
+		if rt.replayFixture == "" {
+			var err error
+			switch sub {
+			case subQuotes:
+				err = rt.optionClient.SubscribeToQuotes(rt.onOptionQuote, missing...)
+			case subTrades:
+				err = rt.optionClient.SubscribeToTrades(rt.onOptionTrade, missing...)
+			}
+			if err != nil {
+				return fmt.Errorf("subscribe option %s for %v: %w", sub, missing, err)
+			}
+		}
+		for _, contract := range missing {
+			rt.optionContracts[contract] = struct{}{}
+			rt.optionSubscriptions[sub][contract] = struct{}{}
 		}
 	}
 	return nil
