@@ -15,7 +15,7 @@ import (
 
 // StonksRuntime owns the retained/shared Alpaca publisher for one stonks
 // service instance. HTTP /stream requests never own this runtime: they only
-// attach request-scoped Logma subscribers to the Redis channels it publishes.
+// attach request-scoped Logma Redis subscribers to the Redis channels it publishes.
 type StonksRuntime struct {
 	pubsub.Runtime
 
@@ -23,11 +23,12 @@ type StonksRuntime struct {
 	credentials    *alpacaCredentials
 	alpacaSecret   string
 	globalChannels bool
+	replayFixture  string
 
-	mu           sync.Mutex
-	tickers      map[string]struct{}
+	mu            sync.Mutex
+	tickers       map[string]struct{}
 	subscriptions map[subscriptionType]map[string]struct{}
-	connected    chan struct{}
+	connected     chan struct{}
 	connectedOnce sync.Once
 }
 
@@ -36,6 +37,7 @@ func NewStonksRuntime(creds *alpacaCredentials) *StonksRuntime {
 		Runtime:        pubsub.NewRuntimeFromEnv(),
 		credentials:    creds,
 		globalChannels: os.Getenv("STONKS_GLOBAL_CHANNELS") == "true",
+		replayFixture:  replayFixturePath(),
 		tickers:        make(map[string]struct{}),
 		subscriptions:  make(map[subscriptionType]map[string]struct{}),
 		connected:      make(chan struct{}),
@@ -63,8 +65,13 @@ func (rt *StonksRuntime) Configure(cfg streamConfig, alpacaSecret string) {
 	}
 	rt.mu.Unlock()
 
-	rt.streamClient = stream.NewStocksClient(cfg.feed, rt.streamOptions(cfg)...)
-	rt.Runtime.ConfigureDefault(rt.streamAlpaca, pubsub.ChannelHandlers{
+	streamFn := rt.streamAlpaca
+	if rt.replayFixture != "" {
+		streamFn = rt.streamReplay
+	} else {
+		rt.streamClient = stream.NewStocksClient(cfg.feed, rt.streamOptions(cfg)...)
+	}
+	rt.Runtime.ConfigureDefault(streamFn, pubsub.ChannelHandlers{
 		rt.AddChannel(): rt.handleAdd,
 	})
 }
@@ -152,7 +159,9 @@ func (rt *StonksRuntime) streamAlpaca(ctx context.Context) error {
 
 // EnsureSubscriptions expands the retained Alpaca stream for a requester.
 // Calls are serialized so the SDK's subscription mutation methods are never
-// invoked concurrently. Existing subscriptions are left untouched.
+// invoked concurrently. Existing subscriptions are left untouched. In replay
+// qualification mode there is no external Alpaca subscription to mutate; the
+// same maps are still updated so fixture filtering follows request semantics.
 func (rt *StonksRuntime) EnsureSubscriptions(cfg streamConfig) error {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
@@ -172,19 +181,21 @@ func (rt *StonksRuntime) EnsureSubscriptions(cfg streamConfig) error {
 			continue
 		}
 
-		var err error
-		switch sub {
-		case subTrades:
-			err = rt.streamClient.SubscribeToTrades(rt.onTrade, missing...)
-		case subQuotes:
-			err = rt.streamClient.SubscribeToQuotes(rt.onQuote, missing...)
-		case subBars:
-			err = rt.streamClient.SubscribeToBars(rt.onBar, missing...)
-		case subDailyBars:
-			err = rt.streamClient.SubscribeToDailyBars(rt.onDailyBar, missing...)
-		}
-		if err != nil {
-			return fmt.Errorf("subscribe %s for %v: %w", sub, missing, err)
+		if rt.replayFixture == "" {
+			var err error
+			switch sub {
+			case subTrades:
+				err = rt.streamClient.SubscribeToTrades(rt.onTrade, missing...)
+			case subQuotes:
+				err = rt.streamClient.SubscribeToQuotes(rt.onQuote, missing...)
+			case subBars:
+				err = rt.streamClient.SubscribeToBars(rt.onBar, missing...)
+			case subDailyBars:
+				err = rt.streamClient.SubscribeToDailyBars(rt.onDailyBar, missing...)
+			}
+			if err != nil {
+				return fmt.Errorf("subscribe %s for %v: %w", sub, missing, err)
+			}
 		}
 		for _, ticker := range missing {
 			rt.tickers[ticker] = struct{}{}
