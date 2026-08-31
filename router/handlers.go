@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/go-chi/chi/v5/middleware"
 	"github.com/xd-dash/logma/serverless/pubsub"
 )
 
@@ -22,11 +21,10 @@ type streamEvent struct {
 	Data    json.RawMessage `json:"data"`
 }
 
-// streamHandler backs POST /stream. One request owns one Stonks publisher
-// session and one embedded Logma serverless Redis->SSE relay. The relay is
-// subscribed and Redis-acknowledged before Alpaca is allowed to start so the
-// first market event cannot race the consumer into existence.
-func streamHandler(holder *pubsub.Holder[*StonksRuntime]) http.HandlerFunc {
+// streamHandler backs POST /stream. Every request owns only its Logma
+// Redis->SSE subscriptions. The Alpaca publisher is retained/shared by the
+// process-level publisherManager and survives requester disconnects.
+func streamHandler(publisher *publisherManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req StreamRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -46,20 +44,17 @@ func streamHandler(holder *pubsub.Holder[*StonksRuntime]) http.HandlerFunc {
 			return
 		}
 
-		rt, ok := holder.Claim()
-		if !ok {
-			http.Error(w, "stream already running", http.StatusConflict)
-			return
-		}
-		rt.RecordInvocation(r, middleware.GetReqID(r.Context()))
-		rt.Configure(cfg, alpacaSecretFromContext(r.Context()))
-
 		ctx, cancel := context.WithCancel(r.Context())
 		defer cancel()
 
+		// prepare may create the shared publisher, but intentionally does not
+		// start Alpaca yet. This lets the first requester make every Redis
+		// subscription live before the producer emits its first event.
+		rt := publisher.prepare(r, cfg, alpacaSecretFromContext(r.Context()))
+		channels := rt.streamChannels(cfg)
 		events := make(chan streamEvent, stonksSSEBuffer)
-		channels := rt.streamChannels()
 		subscribers := make([]*pubsub.Subscriber, 0, len(channels))
+
 		for _, channel := range channels {
 			channel := channel
 			subscriber := pubsub.Subscribe(ctx, rt.Client, channel, func(payload string) {
@@ -68,23 +63,29 @@ func streamHandler(holder *pubsub.Holder[*StonksRuntime]) http.HandlerFunc {
 				case events <- event:
 				case <-ctx.Done():
 				default:
-					// A live screener must not silently convert transport overload
-					// into incomplete market state. Fail the request instead.
-					log.Printf("stonks: SSE consumer fell behind on %s; cancelling request", channel)
+					// Do not silently turn an overloaded transport into incomplete
+					// market state for a screener. End only this requester.
+					log.Printf("stonks: SSE requester fell behind on %s; cancelling requester", channel)
 					cancel()
 				}
 			})
 			subscribers = append(subscribers, subscriber)
 		}
 
-		// Redis Pub/Sub does not replay. Wait until every subscription has
-		// received its Redis acknowledgement before connecting Alpaca.
 		for _, subscriber := range subscribers {
 			select {
 			case <-subscriber.Ready():
 			case <-ctx.Done():
 				return
 			}
+		}
+
+		// The first request starts the process-owned publisher only after its
+		// subscribers are ready. Later requests merely ensure any newly asked
+		// symbol/type pairs are subscribed on the existing Alpaca connection.
+		if err := publisher.activate(ctx, rt, cfg); err != nil {
+			http.Error(w, "publisher unavailable: "+err.Error(), http.StatusServiceUnavailable)
+			return
 		}
 
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -95,14 +96,11 @@ func streamHandler(holder *pubsub.Holder[*StonksRuntime]) http.HandlerFunc {
 		_, _ = w.Write([]byte(": connected\n\n"))
 		flusher.Flush()
 
-		go rt.Start(ctx)
-
 		keepAlive := time.NewTicker(stonksSSEKeepAlive)
 		defer keepAlive.Stop()
 		for {
 			select {
 			case <-ctx.Done():
-				rt.Cancel()
 				return
 			case <-rt.Done():
 				return
@@ -112,13 +110,11 @@ func streamHandler(holder *pubsub.Holder[*StonksRuntime]) http.HandlerFunc {
 					continue
 				}
 				if _, err := fmt.Fprintf(w, "event: message\ndata: %s\n\n", encoded); err != nil {
-					cancel()
 					return
 				}
 				flusher.Flush()
 			case <-keepAlive.C:
 				if _, err := w.Write([]byte(": keepalive\n\n")); err != nil {
-					cancel()
 					return
 				}
 				flusher.Flush()
