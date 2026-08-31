@@ -15,21 +15,19 @@ import (
 // stonks process. Request handlers may attach/detach freely; cancelling a
 // request never cancels this manager's background context.
 type publisherManager struct {
-	mu      sync.Mutex
-	creds   *alpacaCredentials
-	runtime *StonksRuntime
-	feed    marketdata.Feed
-	started bool
-	cancel  context.CancelFunc
+	mu         sync.Mutex
+	creds      *alpacaCredentials
+	runtime    *StonksRuntime
+	feed       marketdata.Feed
+	optionFeed marketdata.OptionFeed
+	started    bool
+	cancel     context.CancelFunc
 }
 
 func newPublisherManager(creds *alpacaCredentials) *publisherManager {
 	return &publisherManager{creds: creds}
 }
 
-// prepare returns the process-owned publisher, creating and configuring it
-// from the first request if necessary. It deliberately does not start Alpaca;
-// the caller first makes its Redis subscriptions ready, then calls activate.
 func (m *publisherManager) prepare(r *http.Request, cfg streamConfig, secret string) (*StonksRuntime, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -40,6 +38,7 @@ func (m *publisherManager) prepare(r *http.Request, cfg streamConfig, secret str
 			m.runtime = nil
 			m.started = false
 			m.feed = ""
+			m.optionFeed = ""
 			if m.cancel != nil {
 				m.cancel()
 				m.cancel = nil
@@ -49,7 +48,10 @@ func (m *publisherManager) prepare(r *http.Request, cfg streamConfig, secret str
 	}
 	if m.runtime != nil {
 		if cfg.feed != m.feed {
-			return nil, fmt.Errorf("shared publisher already uses feed %q; requested %q", m.feed, cfg.feed)
+			return nil, fmt.Errorf("shared publisher already uses stock feed %q; requested %q", m.feed, cfg.feed)
+		}
+		if len(cfg.optionContracts) > 0 && cfg.optionFeed != m.optionFeed {
+			return nil, fmt.Errorf("shared publisher already uses option feed %q; requested %q", m.optionFeed, cfg.optionFeed)
 		}
 		return m.runtime, nil
 	}
@@ -59,12 +61,10 @@ func (m *publisherManager) prepare(r *http.Request, cfg streamConfig, secret str
 	rt.Configure(cfg, secret)
 	m.runtime = rt
 	m.feed = cfg.feed
+	m.optionFeed = cfg.optionFeed
 	return rt, nil
 }
 
-// activate starts the retained publisher exactly once and then ensures the
-// request's desired symbol/type subscriptions exist. Waiting on Ready makes a
-// first request subscriber-first without coupling publisher lifetime to it.
 func (m *publisherManager) activate(ctx context.Context, rt *StonksRuntime, cfg streamConfig) error {
 	m.mu.Lock()
 	if rt != m.runtime {
