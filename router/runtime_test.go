@@ -6,47 +6,8 @@ import (
 	"github.com/xd-dash/logma/serverless/pubsub"
 )
 
-func TestBaseChannelUsesPerSymbolWhenNotCombined(t *testing.T) {
-	rt := &StonksRuntime{cfg: streamConfig{tickers: []string{"AAPL", "MSFT"}}}
-
-	want := "stonks:quote:AAPL"
-	if got := rt.baseChannel(subQuotes, "AAPL"); got != want {
-		t.Fatalf("baseChannel(subQuotes, AAPL) = %q, want %q", got, want)
-	}
-}
-
-func TestBaseChannelUsesCombinedWhenConfigured(t *testing.T) {
-	rt := &StonksRuntime{cfg: streamConfig{
-		tickers:  []string{"MSFT", "AAPL"},
-		combined: map[subscriptionType]bool{subQuotes: true},
-	}}
-
-	want := "stonks:quote:combined:AAPL:MSFT"
-	if got := rt.baseChannel(subQuotes, "AAPL"); got != want {
-		t.Fatalf("baseChannel(subQuotes, AAPL) = %q, want %q", got, want)
-	}
-	if got := rt.baseChannel(subQuotes, "MSFT"); got != want {
-		t.Fatalf("baseChannel(subQuotes, MSFT) = %q, want %q", got, want)
-	}
-}
-
-func TestBaseChannelOnlyCombinesConfiguredTypes(t *testing.T) {
-	rt := &StonksRuntime{cfg: streamConfig{
-		tickers:  []string{"AAPL", "MSFT"},
-		combined: map[subscriptionType]bool{subQuotes: true},
-	}}
-
-	want := "stonks:bar:AAPL"
-	if got := rt.baseChannel(subBars, "AAPL"); got != want {
-		t.Fatalf("baseChannel(subBars, AAPL) = %q, want %q (bars weren't combined)", got, want)
-	}
-}
-
 func TestPublishChannelUsesInstanceScopeByDefault(t *testing.T) {
-	rt := &StonksRuntime{
-		Runtime: pubsub.NewRuntime(nil),
-		cfg:     streamConfig{tickers: []string{"AAPL"}},
-	}
+	rt := &StonksRuntime{Runtime: pubsub.NewRuntime(nil)}
 
 	want := "stonks:trade:AAPL:" + rt.InstanceID
 	if got := rt.publishChannel(subTrades, "AAPL"); got != want {
@@ -57,7 +18,6 @@ func TestPublishChannelUsesInstanceScopeByDefault(t *testing.T) {
 func TestPublishChannelUsesGlobalScopeWhenEnabled(t *testing.T) {
 	rt := &StonksRuntime{
 		Runtime:        pubsub.NewRuntime(nil),
-		cfg:            streamConfig{tickers: []string{"AAPL"}},
 		globalChannels: true,
 	}
 
@@ -67,22 +27,38 @@ func TestPublishChannelUsesGlobalScopeWhenEnabled(t *testing.T) {
 	}
 }
 
-func TestStreamChannelsDeduplicatesCombinedChannels(t *testing.T) {
-	rt := &StonksRuntime{
-		Runtime: pubsub.NewRuntime(nil),
-		cfg: streamConfig{
-			tickers:       []string{"AAPL", "MSFT"},
-			subscriptions: []subscriptionType{subQuotes},
-			combined:      map[subscriptionType]bool{subQuotes: true},
-		},
+func TestStreamChannelsUsesCanonicalPerSymbolChannels(t *testing.T) {
+	rt := &StonksRuntime{Runtime: pubsub.NewRuntime(nil)}
+	cfg := streamConfig{
+		tickers:       []string{"AAPL", "MSFT"},
+		subscriptions: []subscriptionType{subQuotes},
+		combined:      map[subscriptionType]bool{subQuotes: true},
 	}
-	channels := rt.streamChannels()
+
+	channels := rt.streamChannels(cfg)
+	if len(channels) != 2 {
+		t.Fatalf("streamChannels returned %d channels, want 2: %v", len(channels), channels)
+	}
+	want := map[string]bool{
+		"stonks:quote:AAPL:" + rt.InstanceID: true,
+		"stonks:quote:MSFT:" + rt.InstanceID: true,
+	}
+	for _, channel := range channels {
+		if !want[channel] {
+			t.Fatalf("unexpected channel %q", channel)
+		}
+	}
+}
+
+func TestStreamChannelsDeduplicatesRepeatedTickers(t *testing.T) {
+	rt := &StonksRuntime{Runtime: pubsub.NewRuntime(nil)}
+	cfg := streamConfig{
+		tickers:       []string{"AAPL", "AAPL"},
+		subscriptions: []subscriptionType{subQuotes},
+	}
+	channels := rt.streamChannels(cfg)
 	if len(channels) != 1 {
-		t.Fatalf("streamChannels() returned %d channels, want 1: %v", len(channels), channels)
-	}
-	want := "stonks:quote:combined:AAPL:MSFT:" + rt.InstanceID
-	if channels[0] != want {
-		t.Fatalf("streamChannels()[0] = %q, want %q", channels[0], want)
+		t.Fatalf("streamChannels returned %d channels, want 1: %v", len(channels), channels)
 	}
 }
 
