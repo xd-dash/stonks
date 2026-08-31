@@ -50,7 +50,11 @@ func streamHandler(publisher *publisherManager) http.HandlerFunc {
 		// prepare may create the shared publisher, but intentionally does not
 		// start Alpaca yet. This lets the first requester make every Redis
 		// subscription live before the producer emits its first event.
-		rt := publisher.prepare(r, cfg, alpacaSecretFromContext(r.Context()))
+		rt, err := publisher.prepare(r, cfg, alpacaSecretFromContext(r.Context()))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
 		channels := rt.streamChannels(cfg)
 		events := make(chan streamEvent, stonksSSEBuffer)
 		subscribers := make([]*pubsub.Subscriber, 0, len(channels))
@@ -63,8 +67,6 @@ func streamHandler(publisher *publisherManager) http.HandlerFunc {
 				case events <- event:
 				case <-ctx.Done():
 				default:
-					// Do not silently turn an overloaded transport into incomplete
-					// market state for a screener. End only this requester.
 					log.Printf("stonks: SSE requester fell behind on %s; cancelling requester", channel)
 					cancel()
 				}
