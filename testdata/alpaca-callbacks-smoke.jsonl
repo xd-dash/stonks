@@ -1,0 +1,6 @@
+{"type":"quote","data":{"symbol":"SPY","bid_exchange":"V","bid_price":645.10,"bid_size":12,"ask_exchange":"V","ask_price":645.12,"ask_size":9,"timestamp":"2026-08-29T19:00:00Z","conditions":["R"],"tape":"A"}}
+{"type":"trade","data":{"id":900001,"symbol":"SPY","exchange":"V","price":645.11,"size":100,"timestamp":"2026-08-29T19:00:00.100Z","conditions":["@"],"tape":"A"}}
+{"type":"bar","data":{"symbol":"SPY","open":645.00,"high":645.20,"low":644.95,"close":645.11,"volume":15000,"timestamp":"2026-08-29T19:00:00Z","trade_count":250,"vwap":645.07}}
+{"type":"quote","data":{"symbol":"AAPL","bid_exchange":"V","bid_price":232.40,"bid_size":8,"ask_exchange":"V","ask_price":232.43,"ask_size":10,"timestamp":"2026-08-29T19:00:00.200Z","conditions":["R"],"tape":"C"}}
+{"type":"trade","data":{"id":900002,"symbol":"AAPL","exchange":"V","price":232.42,"size":50,"timestamp":"2026-08-29T19:00:00.300Z","conditions":["@"],"tape":"C"}}
+{"type":"bar","data":{"symbol":"AAPL","open":232.30,"high":232.50,"low":232.25,"close":232.42,"volume":12000,"timestamp":"2026-08-29T19:00:00Z","trade_count":180,"vwap":232.39}}
