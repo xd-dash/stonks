@@ -9,7 +9,7 @@ import (
 func TestPublishChannelUsesInstanceScopeByDefault(t *testing.T) {
 	rt := &StonksRuntime{Runtime: pubsub.NewRuntime(nil)}
 
-	want := "stonks:trade:AAPL:" + rt.InstanceID
+	want := rt.InstanceID + ":stonks:trade:AAPL"
 	if got := rt.publishChannel(subTrades, "AAPL"); got != want {
 		t.Fatalf("publishChannel(subTrades, AAPL) = %q, want %q", got, want)
 	}
@@ -21,7 +21,7 @@ func TestPublishChannelUsesGlobalScopeWhenEnabled(t *testing.T) {
 		globalChannels: true,
 	}
 
-	want := "stonks:trade:AAPL:global"
+	want := "global:stonks:trade:AAPL"
 	if got := rt.publishChannel(subTrades, "AAPL"); got != want {
 		t.Fatalf("publishChannel(subTrades, AAPL) = %q, want %q", got, want)
 	}
@@ -40,8 +40,8 @@ func TestStreamChannelsUsesCanonicalPerSymbolChannels(t *testing.T) {
 		t.Fatalf("streamChannels returned %d channels, want 2: %v", len(channels), channels)
 	}
 	want := map[string]bool{
-		"stonks:quote:AAPL:" + rt.InstanceID: true,
-		"stonks:quote:MSFT:" + rt.InstanceID: true,
+		rt.InstanceID + ":stonks:quote:AAPL": true,
+		rt.InstanceID + ":stonks:quote:MSFT": true,
 	}
 	for _, channel := range channels {
 		if !want[channel] {
