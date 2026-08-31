@@ -5,16 +5,13 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/xd-dash/logma-serverless/pubsub"
-	baserouter "github.com/xd-dash/logma-serverless/router"
+	"github.com/xd-dash/logma/serverless/pubsub"
+	baserouter "github.com/xd-dash/logma/serverless/router"
 )
 
-// NewRouter builds stonks's router via logma-serverless's router.Build
-// shell -- its standard middleware stack -- dropping in this package's
-// own /stream route and handler as the register closure. A container
-// instance lives across many sequential requests, but each request's
-// runtime is single-use: once a session's StonksRuntime finishes, the
-// next request gets a fresh one.
+// NewRouter builds stonks's router via Logma serverless's shared HTTP shell.
+// Each completed request gets a fresh StonksRuntime; the active request owns
+// both its Alpaca publisher and the request-scoped SSE relay.
 func NewRouter() http.Handler {
 	creds := &alpacaCredentials{}
 	holder := pubsub.NewHolder(func() *StonksRuntime { return NewStonksRuntime(creds) })
