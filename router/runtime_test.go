@@ -3,7 +3,7 @@ package router
 import (
 	"testing"
 
-	"github.com/xd-dash/logma-serverless/pubsub"
+	"github.com/xd-dash/logma/serverless/pubsub"
 )
 
 func TestBaseChannelUsesPerSymbolWhenNotCombined(t *testing.T) {
@@ -64,6 +64,25 @@ func TestPublishChannelUsesGlobalScopeWhenEnabled(t *testing.T) {
 	want := "stonks:trade:AAPL:global"
 	if got := rt.publishChannel(subTrades, "AAPL"); got != want {
 		t.Fatalf("publishChannel(subTrades, AAPL) = %q, want %q", got, want)
+	}
+}
+
+func TestStreamChannelsDeduplicatesCombinedChannels(t *testing.T) {
+	rt := &StonksRuntime{
+		Runtime: pubsub.NewRuntime(nil),
+		cfg: streamConfig{
+			tickers:       []string{"AAPL", "MSFT"},
+			subscriptions: []subscriptionType{subQuotes},
+			combined:      map[subscriptionType]bool{subQuotes: true},
+		},
+	}
+	channels := rt.streamChannels()
+	if len(channels) != 1 {
+		t.Fatalf("streamChannels() returned %d channels, want 1: %v", len(channels), channels)
+	}
+	want := "stonks:quote:combined:AAPL:MSFT:" + rt.InstanceID
+	if channels[0] != want {
+		t.Fatalf("streamChannels()[0] = %q, want %q", channels[0], want)
 	}
 }
 
