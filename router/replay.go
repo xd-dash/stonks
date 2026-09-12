@@ -14,7 +14,7 @@ import (
 
 // replayEnvelope stores an Alpaca SDK callback object immediately before the
 // normal Stonks callback boundary. It deliberately does not store Redis/Logma
-// payloads: replay must still traverse onTrade/onQuote/onBar -> publish.
+// payloads: replay must still traverse the normal callback -> publish path.
 type replayEnvelope struct {
 	Type string          `json:"type"`
 	Data json.RawMessage `json:"data"`
@@ -36,12 +36,9 @@ func replayDelay() time.Duration {
 	return d
 }
 
-// streamReplay is a qualification source that replaces only the external
-// Alpaca WebSocket. Every decoded object enters through the same callback used
-// by the live SDK and therefore exercises the production Stonks -> Redis path.
-// After the bounded fixture is emitted it remains alive until the publisher is
-// stopped, matching the retained-publisher lifecycle closely enough for SSE
-// requesters to finish draining their request-local buffers.
+// streamReplay replaces only the external Alpaca WebSockets. Every decoded
+// object enters through the same stock/option callbacks used by the live SDK,
+// so qualification still exercises Stonks -> Redis publication.
 func (rt *StonksRuntime) streamReplay(ctx context.Context) error {
 	path := rt.replayFixture
 	if path == "" {
@@ -139,6 +136,28 @@ func (rt *StonksRuntime) publishReplayEnvelope(envelope replayEnvelope) error {
 		if rt.replaySubscribed(subDailyBars, event.Symbol) {
 			rt.onDailyBar(event)
 		}
+	case "option_quote":
+		var event stream.OptionQuote
+		if err := json.Unmarshal(envelope.Data, &event); err != nil {
+			return fmt.Errorf("decode option quote callback: %w", err)
+		}
+		if event.Symbol == "" {
+			return fmt.Errorf("option quote callback has empty symbol")
+		}
+		if rt.replayOptionSubscribed(subQuotes, event.Symbol) {
+			rt.onOptionQuote(event)
+		}
+	case "option_trade":
+		var event stream.OptionTrade
+		if err := json.Unmarshal(envelope.Data, &event); err != nil {
+			return fmt.Errorf("decode option trade callback: %w", err)
+		}
+		if event.Symbol == "" {
+			return fmt.Errorf("option trade callback has empty symbol")
+		}
+		if rt.replayOptionSubscribed(subTrades, event.Symbol) {
+			rt.onOptionTrade(event)
+		}
 	default:
 		return fmt.Errorf("unsupported callback type %q", envelope.Type)
 	}
@@ -153,5 +172,16 @@ func (rt *StonksRuntime) replaySubscribed(sub subscriptionType, symbol string) b
 		return false
 	}
 	_, ok := bySymbol[strings.ToUpper(symbol)]
+	return ok
+}
+
+func (rt *StonksRuntime) replayOptionSubscribed(sub subscriptionType, contract string) bool {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	byContract := rt.optionSubscriptions[sub]
+	if byContract == nil {
+		return false
+	}
+	_, ok := byContract[strings.ToUpper(contract)]
 	return ok
 }
