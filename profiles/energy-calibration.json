@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "name": "energy-calibration",
+  "alpaca": {
+    "groups": {
+      "portfolio": ["XOM", "OXY", "DVN"],
+      "shipping": ["FRO", "DHT"],
+      "lng": ["LNG", "VG", "CRK", "EQT"],
+      "cracks": ["CRAK"],
+      "proxies": ["USO", "UNG", "XLE", "SPY"]
+    },
+    "stock_feed": "iex",
+    "subscriptions": ["quotes", "trades", "bars", "dailybars"],
+    "option_feed": "indicative",
+    "option_subscriptions": ["quotes", "trades"],
+    "discover_options": true,
+    "global_channels": true,
+    "discovery": {
+      "min_dte": 7,
+      "max_dte": 90,
+      "min_moneyness": 0.8,
+      "max_moneyness": 1.25,
+      "min_open_interest": 500,
+      "max_contracts": 180,
+      "max_per_underlying": 24
+    }
+  },
+  "logmash": {
+    "country": "us",
+    "region": "west",
+    "patterns": [
+      "stonks:quote:*:global",
+      "stonks:trade:*:global",
+      "stonks:bar:*:global",
+      "stonks:dailybar:*:global",
+      "stonks:option:quote:*:global",
+      "stonks:option:trade:*:global"
+    ],
+    "callback_args": []
+  }
+}
