@@ -13,6 +13,12 @@
     "subscriptions": ["quotes", "trades", "bars", "dailybars"],
     "option_feed": "indicative",
     "option_subscriptions": ["quotes", "trades"],
+    "option_contracts": [
+      "CRAK260918C00059000",
+      "DVN261218C00055000",
+      "OXY270319C00090000",
+      "XOM270617C00175000"
+    ],
     "discover_options": true,
     "global_channels": true,
     "discovery": {
