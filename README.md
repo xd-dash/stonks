@@ -1,25 +1,89 @@
 # stonks
 
-`stonks` owns one retained/shared Alpaca publisher per running service instance and composes Logma's `serverless` package for request-scoped Redis-to-SSE fanout.
+`stonks` owns market-data acquisition, bounded Alpaca option discovery, and publication into Redis/Logma. It does not require an attached SSE requester to keep its Alpaca publisher alive.
 
-The live path is:
+The canonical path is:
 
 ```text
-Alpaca stock + option streams
+Alpaca stock + option data
           |
           v
- shared Stonks publisher
+        Stonks
+ acquisition / discovery
+      publication
           |
           v
- Farcaster Redis / Logma
-     /       |       \
-    v        v        v
- /stream  /stream  /stream
+      Redis / Logma
+          |
+          v
+    Smoke / Logmash
+ subscription / callbacks
+          |
+          v
+ rh-agent / observers / sinks
 ```
 
-The publisher is process/service-owned. An HTTP requester never owns the Alpaca connection, so disconnecting one SSE client removes only that client's Redis subscriptions.
+Redis is the runtime boundary between Stonks and downstream consumers. Smoke/Logmash owns subscription execution and callback policy; analytical consumers such as rh-agent own state and interpretation.
 
-`POST /stream` accepts stock symbols plus an optional bounded set of exact option contracts:
+## Standalone publisher
+
+`cmd/stonks-publisher` is the canonical process-owned publisher entry point. It loads a Stonks market-data profile, performs bounded option discovery when enabled, configures the stock and option streams, and publishes events without creating a Redis subscriber or SSE response.
+
+Typical configuration:
+
+```text
+REDIS_URI=127.0.0.1:6379
+STONKS_PROFILE=profiles/energy-calibration.json
+ALPACA_API_KEY_ID=...
+ALPACA_API_SECRET_KEY=...
+```
+
+For deterministic qualification, `STONKS_REPLAY_FIXTURE` replaces only the external Alpaca websocket source. Fixture objects still traverse the normal Stonks callback-to-Redis publication path.
+
+## Profiles
+
+A Stonks profile owns market-data intent:
+
+- underlying groups;
+- stock feed and event classes;
+- option feed and event classes;
+- bounded option-discovery policy;
+- optional exact seed contracts;
+- global versus instance channel scope;
+- recommended Logmash source/channel/pattern selectors.
+
+Callback destinations, retries, failure policy, and sink-specific arguments are not Stonks profile concerns; those belong to Smoke/Logmash invocation or downstream consumers.
+
+`profiles/energy-calibration.json` is the current energy-market profile used by qualification.
+
+## Channel shape
+
+Canonical channels are:
+
+```text
+stonks:trade:AAPL:<scope>
+stonks:quote:AAPL:<scope>
+stonks:bar:SPY:<scope>
+stonks:dailybar:SPY:<scope>
+stonks:option:quote:SPY261218C00700000:<scope>
+stonks:option:trade:SPY261218C00700000:<scope>
+```
+
+The scope is normally the Stonks instance ID. Profiles that require stable cross-process consumption may set global channels, producing a final `:global` scope.
+
+Redis Pub/Sub fans one Stonks publication to every active subscriber; downstream analytical, callback, diagnostic, or compatibility consumers do not require separate Alpaca connections.
+
+## Option discovery
+
+Bounded option discovery is Stonks infrastructure. Discovery is constrained by profile parameters such as DTE, moneyness, minimum open interest, maximum total contracts, and maximum contracts per underlying.
+
+The `/stream` compatibility API still accepts an explicit bounded `option_contracts` set and does not perform unbounded discovery inside a request. That request-level restriction does not change ownership of the canonical standalone discovery path.
+
+## HTTP/SSE compatibility adapter
+
+`router.NewRouter()` remains a plain `http.Handler` for existing serverless/container shells. `POST /stream` can attach a request-scoped Logma subscriber and return `text/event-stream` for compatibility with older consumers.
+
+Example request:
 
 ```json
 {
@@ -32,69 +96,29 @@ The publisher is process/service-owned. An HTTP requester never owns the Alpaca 
 }
 ```
 
-Stock `feed` defaults to `iex`; stock subscriptions default to `bars`. Option `option_feed` defaults to `indicative`; option subscriptions default to `quotes` + `trades` when option contracts are supplied. `option_contracts` is explicit, deduplicated, and bounded to 200 contracts per request. Stonks deliberately does not perform unbounded option-chain discovery in `/stream`.
-
-`combined_channels` remains accepted for stock request compatibility but does not alter the shared publisher's canonical per-symbol Redis topology.
-
-The response is `text/event-stream` and includes the exact Redis/Logma channel identity:
-
-```text
-event: message
-data: {"channel":"stonks:quote:AAPL:<instance>","data":{...}}
-```
-
-## Shared publisher lifecycle
-
-The first accepted requester prepares the process-owned publisher but does not immediately start Alpaca. Its Logma Redis subscriptions are created first and must receive Redis subscription acknowledgements. Only then is the shared Alpaca publisher started. This avoids losing the first live publication because Redis Pub/Sub has no replay.
-
-Stocks and options use Alpaca's separate websocket clients but one Stonks runtime owns both. When the first request includes options, readiness means both required upstream clients connected before the request proceeds.
-
-After the publisher is active, later requesters can add stock symbol/type subscriptions and can add option contracts only when the shared publisher was initially created with option streaming. Feed identity is process-wide: a conflicting stock or option feed is rejected rather than silently substituted.
-
-If one SSE requester cannot keep up with its bounded request buffer, only that request is cancelled. The retained publisher and other requesters remain unaffected.
-
-## Channel shape
-
-Canonical channels are:
-
-```text
-stonks:trade:AAPL:<instanceID>
-stonks:quote:AAPL:<instanceID>
-stonks:bar:SPY:<instanceID>
-stonks:option:quote:SPY261218C00700000:<instanceID>
-stonks:option:trade:SPY261218C00700000:<instanceID>
-```
-
-`STONKS_GLOBAL_CHANNELS=true` changes the final scope to `:global`. Keep the instance-scoped default for reusable or potentially multi-instance deployments.
-
-Redis Pub/Sub naturally fans one publication out to every active subscriber, so one Stonks publisher can feed an analytical sandbox, qualification Action, diagnostics, and other SSE consumers simultaneously without opening one upstream connection per requester.
+A `/stream` requester owns only its subscriber/SSE lifetime. Requester disconnect must not be treated as authority to retire a process-owned publisher. New qualification should use the standalone publisher + Redis + Smoke/Logmash boundary unless the SSE adapter itself is what is under test.
 
 ## Farcaster ownership
 
-In the retained Farcaster sandbox:
+In a retained Farcaster deployment:
 
-- Redis/Logma remain retained shared infrastructure;
-- the transient or retained Stonks process owns its Alpaca publisher for its own process lifetime;
-- `/stream` requesters own only request-scoped Logma subscribers;
-- requester disconnect does not retire the Stonks publisher;
-- child qualification activity does not own or replace the retained Farcaster host or canonical Redis/Logma runtime.
+- Redis/Logma are retained shared infrastructure;
+- Stonks owns its publisher for the Stonks service/session lifetime;
+- Smoke/Logmash or other consumers own their subscriptions/callbacks;
+- request/observer disconnect does not retire the publisher;
+- run-scoped qualification activity does not own or replace the retained Farcaster or canonical Redis/Logma runtime.
 
-Service retirement follows Huram Abi exact deployment/state ownership rather than being inferred from SSE client presence.
+Service retirement follows explicit Huram lifecycle ownership rather than consumer presence.
 
 ## Configuration and credentials
 
-Redis uses the shared Logma convention:
+Redis uses the shared Logma conventions:
 
-- `REDIS_URI`
-- `REDIS_SOCKET` when using a Unix socket
-- `REDISCLI_AUTH` / supported file-backed credential form
+- `REDIS_URI`;
+- `REDIS_SOCKET` for Unix sockets;
+- `REDIS_USERNAME` when required;
+- `REDISCLI_AUTH` or supported file-backed credential form.
 
-Alpaca authentication uses:
+Alpaca authentication uses `ALPACA_API_KEY_ID` and `ALPACA_API_SECRET_KEY` for the standalone publisher. The HTTP compatibility adapter also supports its qualified request/file-backed admission forms.
 
-- `ALPACA_API_KEY_ID` or the qualified file-backed admission-key form in the service;
-- `X-Alpaca-Api-Key-Id` on each request;
-- `X-Alpaca-Api-Secret-Key` when the service does not already hold the secret in its in-memory credential cache.
-
-The Alpaca secret is never added to Redis market events or SSE payloads.
-
-`router.NewRouter()` remains a plain `http.Handler` suitable for the existing Go serverless/container shells.
+Credentials are not added to Redis market events, callback payloads, or SSE output.
