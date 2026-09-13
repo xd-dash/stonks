@@ -1,4 +1,4 @@
-// Package router implements the stonks HTTP/SSE entry point.
+// Package router implements the Stonks publisher runtime and HTTP/SSE compatibility adapter.
 package router
 
 import (
@@ -206,8 +206,17 @@ func (rt *StonksRuntime) streamAlpaca(ctx context.Context) error {
 			return fmt.Errorf("failed to connect to Alpaca option stream: %w", err)
 		}
 	}
+
+	rt.mu.Lock()
+	stockSymbols := len(rt.tickers)
+	stockTypes := len(rt.subscriptions)
+	optionContracts := len(rt.optionContracts)
+	optionTypes := len(rt.optionSubscriptions)
+	rt.mu.Unlock()
+
 	rt.connectedOnce.Do(func() { close(rt.connected) })
 	log.Printf("stonks: shared Alpaca publisher connected (instance=%s options=%t)", rt.InstanceID, rt.optionClient != nil)
+	log.Printf("stonks: Alpaca subscriptions ready (stock_symbols=%d stock_types=%d option_contracts=%d option_types=%d)", stockSymbols, stockTypes, optionContracts, optionTypes)
 
 	var optionTerminated <-chan error
 	if rt.optionClient != nil {
