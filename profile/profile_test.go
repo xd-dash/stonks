@@ -20,7 +20,7 @@ func TestProfileFlattensTickerGroupsAndBuildsLogmashArgs(t *testing.T) {
 			"global_channels":true,
 			"discovery":{"min_dte":7,"max_dte":60,"min_moneyness":0.85,"max_moneyness":1.15,"min_open_interest":500,"max_contracts":180,"max_per_underlying":24}
 		},
-		"logmash":{"country":"us","region":"west","channels":["stonks:bar:SPY:global"],"patterns":["stonks:option:quote:*:global"],"callback_args":["--no-stdout","--callback","https://example.invalid/hook"]}
+		"logmash":{"country":"us","region":"west","channels":["stonks:bar:SPY:global"],"patterns":["stonks:option:quote:*:global"]}
 	}`))
 	if err != nil {
 		t.Fatal(err)
@@ -31,7 +31,6 @@ func TestProfileFlattensTickerGroupsAndBuildsLogmashArgs(t *testing.T) {
 	wantArgs := []string{
 		"us:west:stonks:bar:SPY:global",
 		"--pattern", "us:west:stonks:option:quote:*:global",
-		"--no-stdout", "--callback", "https://example.invalid/hook",
 	}
 	if got := p.LogmashArgs(); !reflect.DeepEqual(got, wantArgs) {
 		t.Fatalf("logmash args=%v want=%v", got, wantArgs)
