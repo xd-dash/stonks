@@ -41,7 +41,6 @@
       "stonks:dailybar:*:global",
       "stonks:option:quote:*:global",
       "stonks:option:trade:*:global"
-    ],
-    "callback_args": []
+    ]
   }
 }
