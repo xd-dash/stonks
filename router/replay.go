@@ -38,7 +38,9 @@ func replayDelay() time.Duration {
 
 // streamReplay replaces only the external Alpaca WebSockets. Every decoded
 // object enters through the same stock/option callbacks used by the live SDK,
-// so qualification still exercises Stonks -> Redis publication.
+// so qualification still exercises Stonks -> Redis publication. A replay
+// fixture is finite by definition, so successful EOF completes the replay
+// publisher instead of manufacturing a long-running live lifecycle.
 func (rt *StonksRuntime) streamReplay(ctx context.Context) error {
 	path := rt.replayFixture
 	if path == "" {
@@ -85,8 +87,6 @@ func (rt *StonksRuntime) streamReplay(ctx context.Context) error {
 	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("read replay fixture: %w", err)
 	}
-
-	<-ctx.Done()
 	return nil
 }
 
