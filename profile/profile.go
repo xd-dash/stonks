@@ -31,11 +31,10 @@ type Alpaca struct {
 }
 
 type Logmash struct {
-	Country      string   `json:"country"`
-	Region       string   `json:"region"`
-	Channels     []string `json:"channels,omitempty"`
-	Patterns     []string `json:"patterns,omitempty"`
-	CallbackArgs []string `json:"callback_args,omitempty"`
+	Country  string   `json:"country"`
+	Region   string   `json:"region"`
+	Channels []string `json:"channels,omitempty"`
+	Patterns []string `json:"patterns,omitempty"`
 }
 
 type Profile struct {
@@ -107,18 +106,17 @@ func (p Profile) Tickers() []string {
 	return out
 }
 
-// LogmashArgs projects the Stonks-owned receive policy into Smoke's existing
-// source-qualified Logmash grammar. Stonks owns what it publishes and the
-// recommended receive profile; Smoke remains the subscription/callback runtime.
+// LogmashArgs projects the Stonks-owned receive selectors into Smoke's
+// source-qualified Logmash grammar. Callback destinations and failure policy
+// remain Smoke-owned invocation concerns.
 func (p Profile) LogmashArgs() []string {
 	prefix := strings.ToLower(strings.TrimSpace(p.Logmash.Country)) + ":" + strings.ToLower(strings.TrimSpace(p.Logmash.Region)) + ":"
-	args := make([]string, 0, len(p.Logmash.Channels)+2*len(p.Logmash.Patterns)+len(p.Logmash.CallbackArgs))
+	args := make([]string, 0, len(p.Logmash.Channels)+2*len(p.Logmash.Patterns))
 	for _, channel := range p.Logmash.Channels {
 		args = append(args, prefix+strings.TrimSpace(channel))
 	}
 	for _, pattern := range p.Logmash.Patterns {
 		args = append(args, "--pattern", prefix+strings.TrimSpace(pattern))
 	}
-	args = append(args, p.Logmash.CallbackArgs...)
 	return args
 }
