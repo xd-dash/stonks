@@ -21,9 +21,21 @@ func TestPublishChannelUsesGlobalScopeWhenEnabled(t *testing.T) {
 		globalChannels: true,
 	}
 
-	want := "global:stonks:trade:AAPL"
+	want := "stonks:trade:AAPL:global"
 	if got := rt.publishChannel(subTrades, "AAPL"); got != want {
 		t.Fatalf("publishChannel(subTrades, AAPL) = %q, want %q", got, want)
+	}
+}
+
+func TestOptionPublishChannelUsesGlobalScopeWhenEnabled(t *testing.T) {
+	rt := &StonksRuntime{
+		Runtime:        pubsub.NewRuntime(nil),
+		globalChannels: true,
+	}
+
+	want := "stonks:option:quote:OXY270319C00090000:global"
+	if got := rt.optionPublishChannel(subQuotes, "OXY270319C00090000"); got != want {
+		t.Fatalf("optionPublishChannel(subQuotes, OXY...) = %q, want %q", got, want)
 	}
 }
 
