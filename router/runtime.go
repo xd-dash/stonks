@@ -152,10 +152,14 @@ func (rt *StonksRuntime) publishOption(sub subscriptionType, contract string, ev
 	}
 }
 
+func stonksGlobalChannel(base string) string {
+	return base + ":global"
+}
+
 func (rt *StonksRuntime) publishChannel(sub subscriptionType, symbol string) string {
 	base := channelFor(sub, symbol)
 	if rt.globalChannels {
-		return rt.GlobalChannel(base)
+		return stonksGlobalChannel(base)
 	}
 	return rt.InstanceChannel(base)
 }
@@ -163,7 +167,7 @@ func (rt *StonksRuntime) publishChannel(sub subscriptionType, symbol string) str
 func (rt *StonksRuntime) optionPublishChannel(sub subscriptionType, contract string) string {
 	base := optionChannelFor(sub, contract)
 	if rt.globalChannels {
-		return rt.GlobalChannel(base)
+		return stonksGlobalChannel(base)
 	}
 	return rt.InstanceChannel(base)
 }
